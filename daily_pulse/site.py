@@ -167,11 +167,22 @@ def _valid_days(root: Path) -> list[str]:
     return sorted(days, reverse=True)
 
 
+def _copy_file(src: Path, dest: Path) -> None:
+    """Copy one published input. A file that cannot be read as text, a symlink (which could point
+    anywhere, `data/` included) or a non-file is skipped: one bad file must not cost the site."""
+    try:
+        if src.is_symlink() or not src.is_file():
+            return
+        _write_atomic(dest, src.read_text(encoding="utf-8"), 0o644)
+    except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
+        return
+
+
 def _copy_inputs(out: Path, site: Path) -> None:
     for day in _valid_days(out / "notes"):
         for src in sorted((out / "notes" / day).glob("*.md")):
             if not src.name.startswith("."):
-                _write_atomic(site / "notes" / day / src.name, src.read_text(encoding="utf-8"), 0o644)
+                _copy_file(src, site / "notes" / day / src.name)
     digests = out / "digests"
     if digests.is_dir():
         for src in sorted(digests.iterdir()):
@@ -179,8 +190,8 @@ def _copy_inputs(out: Path, site: Path) -> None:
                 _date.fromisoformat(src.stem)
             except ValueError:
                 continue
-            if src.suffix in (".md", ".html") and src.is_file():
-                _write_atomic(site / "digests" / src.name, src.read_text(encoding="utf-8"), 0o644)
+            if src.suffix in (".md", ".html"):
+                _copy_file(src, site / "digests" / src.name)
 
 
 def build_site(out: Path, site: Path, date: str) -> list[Path]:

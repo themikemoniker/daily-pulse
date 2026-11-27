@@ -206,3 +206,31 @@ def test_cli_site_command_builds_site_under_out(tmp_path):
     assert "Top video" in (out / "site" / "index.html").read_text()
     assert main(["site", "--config", str(cfg), "--date", DAY, "--out", str(out), "--site", str(tmp_path / "s2")]) == 0
     assert (tmp_path / "s2" / "archive" / "index.html").is_file()
+
+
+def test_unreadable_or_symlinked_inputs_are_skipped_not_fatal(tmp_path):
+    out, site = tmp_path / "out", tmp_path / "site"
+    add_note(out, "a", "Top video", 5)
+    day = out / "notes" / DAY
+    (day / "bad.md").write_bytes(b"\xff\xfe\x00")
+    (day / "dir.md").mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRET")
+    (day / "link.md").symlink_to(secret)
+    (out / "digests").mkdir()
+    (out / "digests" / f"{DAY}.md").write_bytes(b"\xff\xfe")
+
+    build_site(out, site, DAY)
+
+    assert "Top video" in (site / "index.html").read_text()
+    assert all("SECRET" not in p.read_text(errors="replace") for p in site_files(site))
+    assert not (site / "notes" / DAY / "link.md").exists()
+
+
+def test_cli_site_command_needs_no_config_file(tmp_path, monkeypatch):
+    from daily_pulse.cli import main
+
+    out = tmp_path / "out"
+    add_note(out, "a", "Top video", 5)
+    monkeypatch.chdir(tmp_path)  # no config/daily-pulse.toml here
+    assert main(["site", "--date", DAY, "--out", str(out)]) == 0

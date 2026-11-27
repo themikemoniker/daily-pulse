@@ -53,6 +53,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "site":  # reads no config: it only needs the output directory
+        return _site(args, args.date or _date.today().isoformat())
     try:
         config = load_config(args.config)
     except (OSError, tomllib.TOMLDecodeError, ConfigError) as exc:
@@ -62,8 +64,6 @@ def main(argv: list[str] | None = None) -> int:
     date = args.date or _date.today().isoformat()
     if args.command == "digest":
         return _digest(args, config, date)
-    if args.command == "site":
-        return _site(args, date)
     try:
         if args.dry_run:  # touches nothing on disk, so needs no lock
             result = run_pipeline(config, date, args.fixtures, dry_run=True)
