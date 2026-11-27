@@ -553,3 +553,37 @@ def test_unusable_generated_at_falls_back_to_the_end_of_the_run_date(make_env, t
 
     assert cli_digest(cfg, out) == 0
     assert "A repo" in diamonds_md((out / "digests" / f"{DATE}.md").read_text(encoding="utf-8"))
+
+
+def test_rerunning_a_date_later_keeps_the_original_run_time_and_the_same_digest(make_env, fixtures_dir, tmp_path, monkeypatch):
+    """A second run of the same date, 30h later, must not move the diamond cutoff."""
+    import daily_pulse.runner as runner
+    from daily_pulse.adapters import registry
+    from conftest import FakeAdapter
+
+    clock = {"now": datetime(2026, 1, 15, 6, 0, tzinfo=timezone.utc)}
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock["now"]
+
+    monkeypatch.setattr(runner, "datetime", FakeDatetime)
+    registry.register(FakeAdapter())
+    cfg, _data, out = make_env()
+    add_note(out / "notes", "young", "Young gem", 9, now=clock["now"], age_hours=47.9)
+
+    def run_and_digest():
+        assert main(["run", "--config", str(cfg), "--fixtures", str(fixtures_dir), "--out", str(out),
+                     "--date", DATE]) == 0
+        assert cli_digest(cfg, out) == 0
+        return [(out / "digests" / f"{DATE}{ext}").read_bytes() for ext in (".md", ".html")]
+
+    first_digest = run_and_digest()
+    first_stamp = json.loads((out / f"run-{DATE}.json").read_text())["generated_at"]
+    clock["now"] += timedelta(hours=30)
+    second_digest = run_and_digest()
+
+    assert json.loads((out / f"run-{DATE}.json").read_text())["generated_at"] == first_stamp
+    assert second_digest == first_digest
+    assert "Young gem" in diamonds_md(first_digest[0].decode())

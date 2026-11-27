@@ -105,9 +105,16 @@ def _preflight_out(out: Path) -> None:
 def _write_result(out: Path, date: str, payload: dict) -> None:
     """Write run-<date>.json atomically. An earlier file for the same date is kept as
     run-<date>.<n>.json, but only once the new file is fully written, so a failed write
-    never loses the earlier result."""
+    never loses the earlier result. A rerun keeps the date's first `generated_at`, so the digest's
+    age reference (and with it the diamond callout) does not move when a day is run again."""
     target = out / f"run-{date}.json"
     staged = out / f".run-{date}.json.new"
+    try:
+        first = json.loads(target.read_text(encoding="utf-8")).get("generated_at")
+    except (OSError, ValueError, AttributeError):  # no earlier file, or an unreadable one
+        first = None
+    if isinstance(first, str) and first:
+        payload = {**payload, "generated_at": first}
     try:
         atomic_write_json(staged, payload)
         if target.exists():
