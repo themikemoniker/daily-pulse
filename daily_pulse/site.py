@@ -112,18 +112,33 @@ def _item_html(e: Entry, date: str, root: str, diamond: bool) -> str:
     )
 
 
-def _run_info(out: Path, date: str) -> tuple[dict, object]:
+def _run_info(site: Path, day: str) -> tuple[dict, object]:
+    """Source statuses and the run's timestamp for `day`, from the site's own copy."""
     try:
-        recorded = json.loads((out / f"run-{date}.json").read_text(encoding="utf-8"))
+        recorded = json.loads((site / "runs" / f"{day}.json").read_text(encoding="utf-8"))
         sources = recorded.get("sources", {})
         return (sources if isinstance(sources, dict) else {}), parse_time(recorded.get("generated_at"))
     except (OSError, ValueError, AttributeError):
         return {}, None
 
 
-def _day_body(site: Path, out: Path, date: str, root: str) -> str:
+def _copy_run_info(out: Path, site: Path, day: str) -> None:
+    """Keep a sanitized copy of run-<day>.json (timestamp and per-source status text only) in the
+    site tree, so an archived day renders the same once `out` no longer holds its run file."""
+    try:
+        raw = json.loads((out / f"run-{day}.json").read_text(encoding="utf-8"))
+        sources = {str(n): {"status": " ".join(str(v["status"]).split())}
+                   for n, v in raw["sources"].items() if isinstance(v, dict) and "status" in v}
+        stamp = raw.get("generated_at")
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        return
+    payload = {"generated_at": stamp if isinstance(stamp, str) else "", "sources": sources}
+    _write_atomic(site / "runs" / f"{day}.json", json.dumps(payload, indent=2, sort_keys=True) + "\n", 0o644)
+
+
+def _day_body(site: Path, date: str, root: str) -> str:
     entries = _load(site / "notes", date)
-    sources, now = _run_info(out, date)
+    sources, now = _run_info(site, date)
     now = now or _default_now(date)
     rows = "\n".join(_item_html(e, date, root, is_diamond(e, now)) for e in entries)
     ranked = f'<ol class="items">\n{rows}\n</ol>' if rows else "<p>No items today.</p>"
@@ -154,37 +169,61 @@ def _note_page(site: Path, date: str, e: Entry, now) -> str:
     ))
 
 
-def _valid_days(root: Path) -> list[str]:
+def _real_dir(path: Path, out: Path | None = None) -> bool:
+    """A real directory: not a symlink, and (when `out` is given) resolving to somewhere under it."""
+    if path.is_symlink() or not path.is_dir():
+        return False
+    return out is None or path.resolve().is_relative_to(out.resolve())
+
+
+def _valid_days(root: Path, out: Path | None = None) -> list[str]:
     days = []
-    if root.is_dir():
+    if _real_dir(root, out):
         for p in root.iterdir():
             try:
                 _date.fromisoformat(p.name)
             except ValueError:
                 continue
-            if p.is_dir():
+            if _real_dir(p, out):
                 days.append(p.name)
     return sorted(days, reverse=True)
 
 
-def _copy_file(src: Path, dest: Path) -> None:
+def _copy_file(src: Path, dest: Path) -> bool:
     """Copy one published input. A file that cannot be read as text, a symlink (which could point
-    anywhere, `data/` included) or a non-file is skipped: one bad file must not cost the site."""
+    anywhere, `data/` included) or a non-file is skipped: one bad file must not cost the site.
+    Only reading is forgiven; a failed write raises, so the build fails loudly."""
     try:
         if src.is_symlink() or not src.is_file():
-            return
-        _write_atomic(dest, src.read_text(encoding="utf-8"), 0o644)
+            return False
+        text = src.read_text(encoding="utf-8")
     except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
-        return
+        return False
+    _write_atomic(dest, text, 0o644)
+    return True
+
+
+def _mirror(directory: Path, keep: set[str], suffixes: tuple[str, ...]) -> None:
+    """Remove files with these suffixes that are not in `keep` (their source is gone)."""
+    if directory.is_dir():
+        for f in directory.iterdir():
+            if f.is_file() and f.suffix in suffixes and f.name not in keep:
+                f.unlink()
 
 
 def _copy_inputs(out: Path, site: Path) -> None:
-    for day in _valid_days(out / "notes"):
+    """Days present in `out` are mirrored: a note removed there is removed from the site too.
+    Days only the site holds are left alone."""
+    for day in _valid_days(out / "notes", out):
+        kept = set()
         for src in sorted((out / "notes" / day).glob("*.md")):
-            if not src.name.startswith("."):
-                _copy_file(src, site / "notes" / day / src.name)
+            if not src.name.startswith(".") and _copy_file(src, site / "notes" / day / src.name):
+                kept.add(src.name)
+        _mirror(site / "notes" / day, kept, (".md",))
+        _mirror(site / "notes" / day, {Path(n).with_suffix(".html").name for n in kept}, (".html",))
+        _copy_run_info(out, site, day)
     digests = out / "digests"
-    if digests.is_dir():
+    if _real_dir(digests, out):
         for src in sorted(digests.iterdir()):
             try:
                 _date.fromisoformat(src.stem)
@@ -199,15 +238,16 @@ def build_site(out: Path, site: Path, date: str) -> list[Path]:
     shown on `index.html`. Returns the pages written (unchanged files are left untouched)."""
     out, site = Path(out), Path(site)
     _copy_inputs(out, site)
+    _copy_run_info(out, site, date)  # also for a day that has a run but no notes
     days = sorted(set(_valid_days(site / "notes")) | {date}, reverse=True)
     pages: dict[Path, str] = {Path("style.css"): CSS}
     for day in days:
-        now = _run_info(out, day)[1] or _default_now(day)
+        now = _run_info(site, day)[1] or _default_now(day)
         entries = _load(site / "notes", day)
-        pages[Path("days") / f"{day}.html"] = _page(f"Daily Pulse — {day}", "../", _day_body(site, out, day, "../"))
+        pages[Path("days") / f"{day}.html"] = _page(f"Daily Pulse — {day}", "../", _day_body(site, day, "../"))
         for e in entries:
             pages[Path("notes") / day / f"{e.stem}.html"] = _note_page(site, day, e, now)
-    pages[Path("index.html")] = _page(f"Daily Pulse — {date}", "", _day_body(site, out, date, ""))
+    pages[Path("index.html")] = _page(f"Daily Pulse — {date}", "", _day_body(site, date, ""))
     rows = []
     for day in days:
         n = len(_load(site / "notes", day))

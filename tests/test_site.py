@@ -234,3 +234,71 @@ def test_cli_site_command_needs_no_config_file(tmp_path, monkeypatch):
     add_note(out, "a", "Top video", 5)
     monkeypatch.chdir(tmp_path)  # no config/daily-pulse.toml here
     assert main(["site", "--date", DAY, "--out", str(out)]) == 0
+
+
+def test_symlinked_day_directory_publishes_nothing(tmp_path):
+    out, site = tmp_path / "out", tmp_path / "site"
+    add_note(out, "a", "Top video", 5)
+    private = tmp_path / "private"
+    add_note(tmp_path / "priv-out", "t", "PRIVATE TRANSCRIPT", 5, date="2026-01-10")
+    (out / "notes" / "2026-01-10").symlink_to(tmp_path / "priv-out" / "notes" / "2026-01-10")
+    other = tmp_path / "outB"
+    (other).mkdir()
+    (other / "notes").symlink_to(out / "notes")
+
+    build_site(out, site, DAY)
+    build_site(other, tmp_path / "siteB", DAY)
+
+    assert not (site / "notes" / "2026-01-10").exists()
+    assert all("PRIVATE" not in p.read_text() for p in site_files(site))
+    assert not (tmp_path / "siteB" / "notes").exists()
+    assert not private.exists()
+
+
+def test_past_day_keeps_callout_and_statuses_when_run_file_is_gone(tmp_path):
+    out1, out2, site = tmp_path / "out1", tmp_path / "out2", tmp_path / "site"
+    add_note(out1, "gem", "Early gem", 9, age_hours=5, date=PREV, now=NOW - timedelta(days=1))
+    (out1 / f"run-{PREV}.json").write_text(json.dumps(
+        {"generated_at": iso(NOW - timedelta(days=1)), "sources": {"x": {"status": "deferred: no route"}}}))
+    build_site(out1, site, PREV)
+    before = (site / "days" / f"{PREV}.html").read_text()
+    note_before = (site / "notes" / PREV / "youtube-gem.html").read_text()
+    assert 'class="diamond"' in before and "deferred: no route" in before
+
+    add_note(out2, "a", "Today", 7)
+    build_site(out2, site, DAY)
+
+    assert (site / "days" / f"{PREV}.html").read_text() == before
+    assert (site / "notes" / PREV / "youtube-gem.html").read_text() == note_before
+
+
+def test_write_failure_fails_the_build(tmp_path):
+    import pytest
+
+    out = tmp_path / "out"
+    add_note(out, "a", "Top video", 5)
+    blocked = tmp_path / "site"
+    blocked.write_text("a file, not a directory")
+
+    with pytest.raises(OSError):
+        build_site(out, blocked, DAY)
+
+    from daily_pulse.cli import main
+    assert main(["site", "--date", DAY, "--out", str(out), "--site", str(blocked)]) == 1
+
+
+def test_deleted_note_disappears_from_the_site(tmp_path):
+    out, site = tmp_path / "out", tmp_path / "site"
+    gone = add_note(out, "a", "Doomed", 5)
+    add_note(out, "b", "Kept", 4)
+    build_site(out, site, DAY)
+    assert (site / "notes" / DAY / "youtube-a.html").is_file()
+
+    gone.unlink()
+    build_site(out, site, DAY)
+
+    assert not (site / "notes" / DAY / "youtube-a.md").exists()
+    assert not (site / "notes" / DAY / "youtube-a.html").exists()
+    assert "Doomed" not in (site / "index.html").read_text()
+    assert "1 item" in (site / "archive" / "index.html").read_text()
+    assert (site / "notes" / DAY / "youtube-b.html").is_file()
