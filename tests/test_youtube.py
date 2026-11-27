@@ -577,3 +577,43 @@ def test_a_live_video_without_captions_is_only_waited_for_three_days(env):
     assert list(e.out.rglob("*.md")) == []
     res = e.go(FakeYtDlp(["stream"], upload_date="20260101", live_status="is_live"), date="2026-01-18")
     assert [i["id"] for i in res.sources["youtube"]["items"]] == ["stream"]
+
+
+# --- review round 3: error-text patterns ---
+
+def test_a_throttled_ip_answering_video_unavailable_leaves_the_video_unprocessed(env):
+    e = env()
+    throttle = "ERROR: [youtube] a: Video unavailable. This content isn't available, try again later."
+    for _ in range(4):
+        res = e.go(FakeYtDlp(["a", "b"], fail_all=throttle))
+        assert res.sources["youtube"]["status"] == "failed"
+    processed = e.data / "state" / "processed.json"
+    assert not processed.exists() or json.loads(processed.read_text()).get("youtube", []) == []
+    assert not (e.data / "state" / "youtube-attempts.json").exists()
+
+
+def test_one_video_that_always_fails_to_extract_is_given_up_on_without_halting_the_source(env):
+    e = env()
+    odd = "ERROR: [youtube] bad: Unable to extract initial data; please report this issue"
+    subs = {i: {"manual": MANUAL} for i in ("bad", "g1", "g2")}
+    first = e.go(FakeYtDlp(["bad", "g1", "g2"], fail_info={"bad"}, fail_message=odd, subs=subs))
+    assert [i["id"] for i in first.sources["youtube"]["items"]] == ["g1", "g2"]  # the ones behind it ran
+    assert e.go(FakeYtDlp(["bad"], fail_info={"bad"}, fail_message=odd)).sources["youtube"]["status"] == "failed"
+    assert e.go(FakeYtDlp(["bad"], fail_info={"bad"}, fail_message=odd)).sources["youtube"]["status"] == "ok"
+    client = FakeYtDlp(["bad"], fail_info={"bad"}, fail_message=odd)
+    e.go(client)
+    assert [c[0] for c in client.calls] == ["playlist"]  # given up on after 3 strikes
+
+
+def test_a_video_id_containing_429_with_no_subtitles_gets_a_metadata_only_note(env, fake_ytdlp):
+    vid = "ab429xyz123"
+    (fake_ytdlp.dir / "playlist.json").write_text(json.dumps({"entries": [{"id": vid, "title": "T"}]}))
+    (fake_ytdlp.dir / "info.json").write_text(json.dumps({"id": vid, "title": "T", "channel": "C",
+                                                           "upload_date": "20260101"}))
+    (fake_ytdlp.dir / "sub-stderr").write_text(
+        f"[youtube] {vid}: Downloading webpage\n[info] There are no subtitles for the requested languages\n")
+    e = env()
+    res = e.go(ProcessYtDlp(str(fake_ytdlp.path)))
+    assert res.sources["youtube"]["status"] == "ok"
+    [note] = list(e.out.rglob("*.md"))
+    assert "Metadata only (no captions)" in note.read_text()

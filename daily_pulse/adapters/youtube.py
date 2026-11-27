@@ -32,20 +32,22 @@ UNAVAILABLE_TITLES = ("[private video]", "[deleted video]")  # placeholders that
 MAX_ATTEMPTS = 3  # video-specific yt-dlp failures for one video before it is given up on
 RECENT_DAYS = 2  # a video uploaded this recently may not have captions yet
 CAPTION_WAIT_DAYS = 3  # how long, from first sight, a video with no captions is waited for
-# yt-dlp errors that say nothing about one video (rate limit, network, bot check, broken binary):
-# never a strike against a video, and the run stops for the source instead of hammering yt-dlp
+# yt-dlp errors that say nothing about one video (rate limit, throttling, server trouble, DNS,
+# bot check, broken binary): never a strike against a video, and the run stops for the source
+# instead of hammering yt-dlp. Keep this narrow: one odd video must not halt the whole source.
 SOURCE_LEVEL_ERRORS = re.compile(
-    r"cannot run|timed out|http error 429|too many requests|unable to download|not a bot"
-    r"|unable to extract|network|connection|temporary failure|name or service|http error 5\d\d", re.I)
-# a video that is not out yet (premiere, scheduled live): worth a few retries, not a lost video
-NOT_YET_AVAILABLE = re.compile(r"premieres? in|premiere will begin|live event will begin|will begin in", re.I)
-# yt-dlp errors that no retry will fix: skip the video at once
+    r"cannot run|timed out|http error 429|too many requests|http error 5\d\d|not a bot"
+    r"|name or service not known|temporary failure in name resolution|connection reset"
+    r"|try again later|content isn't available", re.I)  # the last two: how YouTube words throttling
+# yt-dlp errors that no retry will fix: skip the video at once. Every other failure that is not
+# source-level is a strike against the video (MAX_ATTEMPTS), which covers premieres not out yet.
 PERMANENT_ERRORS = re.compile(
     r"private video|members-only|members only|join this channel|confirm your age|age-restricted"
-    r"|not made this video available in your country|blocked it in your country|video unavailable"
+    r"|not made this video available in your country|blocked it in your country"
     r"|has been removed|account.*terminated", re.I)
-# a subtitle download that failed (as opposed to a video that has no subtitles)
-SUBTITLE_FAILURE = re.compile(r"unable to download|http error|429|too many requests|timed out", re.I)
+# a subtitle download that failed (as opposed to a video that has no subtitles); it is matched
+# against stderr that also holds the video id and a temp path, so keep it to whole phrases
+SUBTITLE_FAILURE = re.compile(r"http error 429|too many requests|unable to download video subtitles", re.I)
 NO_CAPTIONS = "No captions available; rated from metadata only."
 METADATA_ONLY_TAG = "metadata-only"
 
@@ -253,9 +255,9 @@ class YouTubeAdapter(SourceAdapter):
     def _record_failure(self, item: Item, exc: YtDlpError, ctx: AdapterContext) -> None:
         """Handle a yt-dlp failure for one video. Source-level errors (rate limit, timeout,
         network, bot check, broken binary) are no strike against the video: the run stops for the
-        source. A permanent error skips the video at once. Only a "not out yet" error is counted,
-        and the MAX_ATTEMPTS-th such failure raises ItemSkipped (the runner marks the video
-        processed, so it stops failing the source). Anything else just fails this run."""
+        source. A permanent error skips the video at once. Any other failure is a strike, and the
+        MAX_ATTEMPTS-th raises ItemSkipped (the runner marks the video processed, so it stops
+        failing the source)."""
         message = str(exc)
         if SOURCE_LEVEL_ERRORS.search(message):
             self._halted = message
@@ -263,7 +265,7 @@ class YouTubeAdapter(SourceAdapter):
         if PERMANENT_ERRORS.search(message):
             raise ItemSkipped(f"{item.id}: {message}") from exc
         path = self._state_file(ctx, "youtube-attempts.json")
-        if path is None or not NOT_YET_AVAILABLE.search(message):
+        if path is None:
             return
         counts = self._load_map(path)
         counts[item.id] = n = (counts.get(item.id) if isinstance(counts.get(item.id), int) else 0) + 1
