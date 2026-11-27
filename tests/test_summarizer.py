@@ -316,3 +316,63 @@ def test_summarizer_built_from_config_and_env_override(tmp_path, fake_claude):
     assert s.claude_cmd == str(claude.path)
     assert s.rate(repo_item()) is not None
     assert Summarizer.from_config(cfg, env={"DAILY_PULSE_CLAUDE": "  "}).claude_cmd == "/opt/claude"
+
+
+def test_summarize_items_writes_notes_and_carries_on_past_failures(fake_claude, tmp_path):
+    from daily_pulse.summarizer import summarize_items
+
+    claude = fake_claude(good(), "garbage", "garbage", good(rating=3, verdict="skip", diamond=False,
+                                                          diamond_reason=""))
+    items = [repo_item(id="a"), repo_item(id="b"), repo_item(id="c")]
+    results = summarize_items(Summarizer(claude_cmd=str(claude.path)), items, tmp_path / "notes",
+                              "2026-01-02")
+    assert [r.item.id for r in results] == ["a", "b", "c"]
+    assert [r.status for r in results] == ["rated", "unrated", "rated"]
+    assert results[1].rating is None and results[1].path is None
+    assert results[0].path == tmp_path / "notes" / "2026-01-02" / "github-a.md"
+    assert "**8/10**" in results[0].path.read_text()
+    assert "**3/10**" in results[2].path.read_text()
+    assert not (tmp_path / "notes" / "2026-01-02" / "github-b.md").exists()
+
+
+def test_summarize_items_passes_transcripts_but_notes_never_contain_them(fake_claude, tmp_path):
+    from daily_pulse.summarizer import summarize_items
+
+    lifted = " ".join(f"word{i}" for i in range(10, 110))
+    claude = fake_claude(good(summary="", takeaways=[lifted], reason="Routing, in brief."))
+    item = repo_item(source="youtube", id="v1", title="Talk")
+    [res] = summarize_items(Summarizer(claude_cmd=str(claude.path)), [item], tmp_path, "2026-01-02",
+                            transcripts={"v1": TRANSCRIPT})
+    assert "word199" in claude.stdin(0)
+    from daily_pulse.quoteguard import MAX_COPY_RUN, longest_copied_run
+
+    assert longest_copied_run(res.path.read_text(), TRANSCRIPT) <= MAX_COPY_RUN
+
+
+def test_summarize_items_marks_an_item_unrated_when_its_note_cannot_be_written(fake_claude, tmp_path):
+    from daily_pulse.summarizer import summarize_items
+
+    claude = fake_claude(good())
+    items = [repo_item(id="a", title="  "), repo_item(id="b")]  # the first has no title: NoteError
+    results = summarize_items(Summarizer(claude_cmd=str(claude.path)), items, tmp_path, "2026-01-02")
+    assert [r.status for r in results] == ["unrated", "rated"]
+
+
+def test_summarize_items_is_idempotent(fake_claude, tmp_path):
+    from daily_pulse.summarizer import summarize_items
+
+    claude = fake_claude(good())
+    s = lambda: summarize_items(Summarizer(claude_cmd=str(claude.path)), [repo_item()], tmp_path, "2026-01-02")
+    first = s()[0].path.read_text()
+    assert s()[0].path.read_text() == first
+
+
+def test_once_the_cap_is_hit_remaining_items_are_unrated_not_crashes(fake_claude, tmp_path):
+    from daily_pulse.summarizer import summarize_items
+
+    claude = fake_claude(good())
+    items = [repo_item(id=f"r{i}") for i in range(4)]
+    results = summarize_items(Summarizer(claude_cmd=str(claude.path), max_calls=2), items, tmp_path,
+                              "2026-01-02")
+    assert [r.status for r in results] == ["rated", "rated", "unrated", "unrated"]
+    assert claude.calls == 2

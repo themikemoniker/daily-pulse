@@ -17,6 +17,7 @@ from pathlib import Path
 
 from daily_pulse.config import Config
 from daily_pulse.models import VERDICTS, Beat, Item, Rating
+from daily_pulse.notes import NoteError, write_note
 from daily_pulse.quoteguard import QuoteBudget, guard_fields
 
 log = logging.getLogger("daily_pulse")
@@ -184,3 +185,32 @@ class Summarizer:
                 log.warning("%s: attempt %d/%d failed: %s", label, attempt, ATTEMPTS, exc)
         log.warning("%s: left unrated", label)
         return None
+
+
+@dataclass
+class ItemResult:
+    item: Item
+    status: str  # "rated" or "unrated"
+    rating: Rating | None = None
+    path: Path | None = None  # the written note, when rated
+
+
+def summarize_items(summarizer: Summarizer, items: list[Item], notes_dir: Path, date: str,
+                    transcripts: dict[str, str] | None = None) -> list[ItemResult]:
+    """Rate each item and hand the rating to the note writer. One item failing (no valid reply,
+    cap reached, note refused) marks only that item "unrated"; the rest carry on."""
+    transcripts = transcripts or {}
+    results = []
+    for item in items:
+        transcript = transcripts.get(item.id, "")
+        rating = summarizer.rate(item, transcript)
+        if rating is not None:
+            try:
+                path = write_note(item, rating, notes_dir, date, transcript)
+            except (NoteError, OSError) as exc:
+                log.warning("%s-%s: left unrated, note not written: %s", item.source, item.id, exc)
+            else:
+                results.append(ItemResult(item, "rated", rating, path))
+                continue
+        results.append(ItemResult(item, "unrated"))
+    return results

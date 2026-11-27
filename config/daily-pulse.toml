@@ -7,6 +7,10 @@ alert_after_failures = 2    # consecutive module failures before a run flags it
 [paths]
 data_dir = "../data"        # local-only state, logs, transcripts (gitignored); relative to this file
 
+[summarizer]
+claude_cmd = "claude"       # the CLI used for `claude -p`; $DAILY_PULSE_CLAUDE overrides it
+max_calls = 30              # cap on `claude -p` calls per run, retries included
+
 [sources.youtube]
 enabled = true
 playlist_url = ""           # unset until supplied; the module reports "not configured"
