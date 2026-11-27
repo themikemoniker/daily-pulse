@@ -105,20 +105,41 @@ def is_diamond(entry: Entry, now: datetime) -> bool:
     return now - entry.published < DIAMOND_MAX_AGE
 
 
+def _status_lines(entries: list[Entry], sources: dict | None) -> list[tuple[str, str]]:
+    """(source, status) per source. Item counts come from the notes on disk rather than the run
+    result, so rebuilding after a rerun that found nothing new still reports what is shown."""
+    counts: dict[str, int] = {}
+    for e in entries:
+        counts[e.source] = counts.get(e.source, 0) + 1
+    names = list(sources or {}) + sorted(n for n in counts if n not in (sources or {}))
+    lines = []
+    for name in names:
+        status = str((sources or {}).get(name, {}).get("status", "ok"))
+        if status == "ok":
+            n = counts.get(name, 0)
+            status = f"ok, {n} item{'' if n == 1 else 's'}"
+        lines.append((name, status))
+    return lines
+
+
 def build_digest(notes_dir: Path, date: str, sources: dict | None = None,
                  base_url: str = "", now: datetime | None = None) -> Digest:
     entries = _load(notes_dir, date)
     now = now or _default_now(date)
     diamonds = [e for e in entries if is_diamond(e, now)]
+    statuses = _status_lines(entries, sources)
     md = [f"# Daily Pulse — {date}", "", "## Diamonds in the rough", ""]
     md += [f"- **{e.rating}/10** [{e.title}]({e.url}) — {e.reason}" for e in diamonds] or ["None today."]
     md += ["", "## Ranked", ""]
     md += [f"{i}. **{e.rating}/10 · {e.verdict}** [{e.title}]({e.url}) — {e.reason}"
-           for i, e in enumerate(entries, 1)]
+           for i, e in enumerate(entries, 1)] or ["No items today."]
+    md += ["", "## Sources", ""] + [f"- {name}: {status}" for name, status in statuses]
 
     def rows(items):
         return "".join(f"<tr><td>{e.rating}/10</td><td>{html.escape(e.title)}</td></tr>" for e in items)
 
+    status_rows = "".join(f"<tr><td>{html.escape(n)}</td><td>{html.escape(s)}</td></tr>" for n, s in statuses)
     page = (f"<h2>Diamonds in the rough</h2><table>{rows(diamonds)}</table>"
-            f"<h2>Ranked</h2><table>{rows(entries)}</table>")
+            f"<h2>Ranked</h2><table>{rows(entries) or '<tr><td>No items today.</td></tr>'}</table>"
+            f"<h2>Sources</h2><table>{status_rows}</table>")
     return Digest("\n".join(md) + "\n", page)

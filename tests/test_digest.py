@@ -129,3 +129,61 @@ def test_no_diamonds_says_so(tmp_path):
     add_note(notes, "a", "Ordinary", 5)
 
     assert "None today" in diamonds_md(digest(notes).markdown)
+
+
+def status_lines(text):
+    """`source: status` lines from the Sources section of the markdown, as a dict."""
+    section = text.split("## Sources", 1)[1].split("\n## ", 1)[0]
+    pairs = (line[2:].split(": ", 1) for line in section.splitlines() if line.startswith("- "))
+    return {name: status for name, status in pairs}
+
+
+def test_every_source_gets_a_status_line(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "v1", "Video one", 7, source="youtube")
+    add_note(notes, "v2", "Video two", 6, source="youtube")
+    add_note(notes, "r1", "Repo one", 5, source="github")
+    sources = {
+        "youtube": {"status": "ok", "items": [{}, {}]},
+        "instagram": {"status": "deferred: no CLI configured", "items": []},
+        "x": {"status": "deferred: no usable route", "items": []},
+        "github": {"status": "ok", "items": [{}]},
+    }
+
+    lines = status_lines(digest(notes, sources).markdown)
+
+    assert lines == {
+        "youtube": "ok, 2 items",
+        "instagram": "deferred: no CLI configured",
+        "x": "deferred: no usable route",
+        "github": "ok, 1 item",
+    }
+
+
+def test_failed_and_unconfigured_sources_show_status_not_a_gap(tmp_path):
+    notes = tmp_path / "notes"
+    sources = {
+        "youtube": {"status": "not configured", "items": []},
+        "github": {"status": "failed", "items": [], "error": "RuntimeError: boom", "consecutive_failures": 1},
+    }
+
+    d = digest(notes, sources)
+
+    assert status_lines(d.markdown) == {"youtube": "not configured", "github": "failed"}
+    for html_text in (d.html,):
+        assert "youtube" in html_text and "not configured" in html_text
+        assert "github" in html_text and "failed" in html_text
+    assert "RuntimeError" not in d.markdown + d.html  # no internals leaked into a published page
+
+
+def test_ok_source_with_nothing_new_still_says_so(tmp_path):
+    sources = {"github": {"status": "ok", "items": []}}
+
+    assert status_lines(digest(tmp_path / "notes", sources).markdown) == {"github": "ok, 0 items"}
+
+
+def test_a_day_with_no_notes_still_builds_a_page(tmp_path):
+    d = digest(tmp_path / "missing", {"youtube": {"status": "not configured", "items": []}})
+
+    assert "No items today." in d.markdown
+    assert "No items today." in d.html
