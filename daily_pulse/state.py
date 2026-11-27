@@ -7,12 +7,12 @@ import tempfile
 from pathlib import Path
 
 
-def atomic_write_json(path: Path, payload: dict) -> None:
+def atomic_write_json(path: Path, payload: dict, default=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
+            json.dump(payload, fh, indent=2, sort_keys=True, default=default)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
@@ -26,15 +26,29 @@ class StateError(Exception):
     """State on disk is unreadable. Never guess: resetting would reprocess everything."""
 
 
+def _valid_counter(entry: dict) -> bool:
+    return all(isinstance(entry.get(k, 0), int) and not isinstance(entry.get(k, 0), bool)
+               for k in ("consecutive", "total"))
+
+
+def _valid_ids(entry: list) -> bool:
+    return all(isinstance(i, str) for i in entry)
+
+
 def _read_json(path: Path, value_type: type) -> dict:
-    """Read a state file: an object whose values are all `value_type`."""
+    """Read a state file: an object whose values are all `value_type` (and well-formed)."""
     try:
         data = json.loads(path.read_text())
     except FileNotFoundError:
         return {}
     except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
         raise StateError(f"cannot read state file {path}: {exc}. Fix or remove it and re-run.") from exc
-    if not isinstance(data, dict) or not all(isinstance(v, value_type) for v in data.values()):
+    check = _valid_ids if value_type is list else _valid_counter
+    if (
+        not isinstance(data, dict)
+        or not all(isinstance(v, value_type) for v in data.values())
+        or not all(check(v) for v in data.values())
+    ):
         raise StateError(
             f"state file {path} has an unexpected shape (expected an object of "
             f"{value_type.__name__}s). Fix or remove it and re-run."

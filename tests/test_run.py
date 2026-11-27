@@ -474,3 +474,68 @@ def test_unusable_lock_location_is_a_clean_error(make_env, fixtures_dir, tmp_pat
     assert run(cfg, out, fixtures_dir) == 1
     err = capsys.readouterr().err
     assert "run lock" in err and "Traceback" not in err
+
+
+# --- second review round -----------------------------------------------------------------
+
+def test_adapter_returning_a_non_item_fails_that_item_not_the_run(make_env, fixtures_dir):
+    class ReturnsNone(FakeAdapter):
+        def fetch_details(self, item, ctx):
+            return None if item.id == "a1" else super().fetch_details(item, ctx)
+
+    registry.register(ReturnsNone())
+    registry.register(FakeAdapter("other"))
+    (fixtures_dir / "other").mkdir()
+    (fixtures_dir / "other" / "items.json").write_text((fixtures_dir / "fake" / "items.json").read_text())
+    cfg, data, out = make_env(sources=("fake", "other"))
+    assert run(cfg, out, fixtures_dir) == 0
+    srcs = result(out)["sources"]
+    assert srcs["fake"]["status"] == "failed"
+    assert [i["id"] for i in srcs["fake"]["items"]] == ["a2"]
+    assert len(srcs["other"]["items"]) == 2
+    processed = json.loads((data / "state" / "processed.json").read_text())
+    assert processed["fake"] == ["a2"]  # a1 is retried next run, not silently lost
+
+
+def test_item_that_cannot_be_serialized_is_an_item_failure_and_not_consumed(make_env, fixtures_dir):
+    class BadMetrics(FakeAdapter):
+        def fetch_details(self, item, ctx):
+            item = super().fetch_details(item, ctx)
+            if item.id == "a1":
+                item.metrics = {"views": {1, 2}}  # a set is not JSON
+            return item
+
+    registry.register(BadMetrics())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+    src = result(out)["sources"]["fake"]
+    assert src["status"] == "failed"
+    assert [i["id"] for i in src["items"]] == ["a2"]
+    assert json.loads((data / "state" / "processed.json").read_text())["fake"] == ["a2"]
+
+
+def test_deeper_state_shape_problems_are_state_errors(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    cases = {
+        "processed.json": '{"fake": [["x"]]}',
+        "failures.json": '{"fake": {"consecutive": "many"}}',
+    }
+    for name, body in cases.items():
+        (data / "state" / name).write_text(body)
+        assert run(cfg, out, fixtures_dir) == 1
+        err = capsys.readouterr().err
+        assert name in err and "Traceback" not in err
+        (data / "state" / name).unlink()
+
+
+def test_unusable_log_location_is_a_clean_error(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    data.mkdir()
+    (data / "logs").write_text("a file where the log dir should be")
+    assert run(cfg, out, fixtures_dir) == 1
+    err = capsys.readouterr().err
+    assert "logs" in err and "Traceback" not in err
+    assert not (data / "state" / "processed.json").exists()

@@ -79,8 +79,8 @@ def _write_result(out: Path, date: str, payload: dict) -> None:
             n = 1
             while (out / f"run-{date}.{n}.json").exists():
                 n += 1
-            target.rename(out / f"run-{date}.{n}.json")
-        os.replace(staged, target)
+            os.link(target, out / f"run-{date}.{n}.json")  # keep the old content aside
+        os.replace(staged, target)  # atomic: the canonical file is never missing
     except BaseException:
         staged.unlink(missing_ok=True)
         raise
@@ -93,8 +93,12 @@ def _run(args, config, date: str) -> int:
         print(f"daily-pulse: cannot write output to {args.out}: {exc}", file=sys.stderr)
         return 1
     log_dir = config.data_dir / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(log_dir / f"run-{date}.log")
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(log_dir / f"run-{date}.log")
+    except OSError as exc:
+        print(f"daily-pulse: cannot write run log in {log_dir}: {exc}", file=sys.stderr)
+        return 1
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger = logging.getLogger("daily_pulse")
     logger.setLevel(logging.INFO)
@@ -107,13 +111,13 @@ def _run(args, config, date: str) -> int:
     payload = result.to_dict()
     try:
         _write_result(args.out, date, payload)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 - whatever went wrong, don't lose the result
         # State is already committed, so don't lose what this run found: keep it locally.
         saved = log_dir / f"run-{date}.unsaved.json"
         try:
-            atomic_write_json(saved, payload)
+            atomic_write_json(saved, payload, default=str)
             where = f"this run's result was saved to {saved}"
-        except OSError as exc2:
+        except Exception as exc2:  # noqa: BLE001
             where = f"the result could not be saved locally either ({exc2})"
         print(f"daily-pulse: cannot write result to {args.out}: {exc}; {where}", file=sys.stderr)
         return 1
