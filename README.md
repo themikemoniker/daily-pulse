@@ -40,6 +40,16 @@ identical files.
 - The binary is `[summarizer] claude_cmd` or, if set, `$DAILY_PULSE_CLAUDE` (a command string; tests point it at a fake script). Tests never run the real `claude`.
 - Returned ratings pass through the quote guard against the transcript and the item excerpt: no run of more than 40 copied words, and quoted words capped under 50 per item. Not yet called by the runner; the digest ticket plugs in.
 
+## GitHub source
+
+`daily_pulse/adapters/github.py` uses the GitHub REST API (stdlib `urllib`), unauthenticated unless the `GITHUB_TOKEN` environment variable is set (read per request, sent only as a bearer header, never logged or stored).
+
+- **Rising**: repos created in the last `rising_days` (default 7), top 10 by stars. Metrics carry `stars`, `age_days` and `star_velocity` (stars / age in days, age floored at one day). Id `rising:<owner/repo>`.
+- **Watched accounts** (`watch_accounts`): new repos (`repo:`), releases in the last `lookback_days` (`release:<repo>:<tag>`), the newest tag when a recently pushed repo has no release (`tag:`), a push on the run day when nothing else explains it (`push:<repo>:<date>`), and a star gain of at least `star_delta` (default 50) since the previous run (`stars:<repo>:<date>`). The star baseline lives in `data/state/github.json`; it is not written on `--dry-run`. Forks are ignored.
+- **Watched repos** (`watch_repos`, e.g. `can1357/oh-my-pi`): releases only, checked first so a tight rate limit cannot starve them. Top-contributor tracking is not implemented.
+- **Rate limits**: `X-RateLimit-Remaining` is read on every response. A 403/429 rate-limit response waits out a short `Retry-After`/reset (at most 30 s) once; otherwise, or when the budget hits zero, the adapter logs a warning, stops calling the API and returns what it already has (`adapter.last_run["degraded"]`). It never raises for a rate limit.
+- Tests use recorded responses in `tests/fixtures/github/responses.json` (keyed by API path) via `--fixtures`, or an injected transport. Unauthenticated limits are 60 requests/hour, so a long watch list may degrade without a token.
+
 ## Static site
 
 `daily-pulse site --out <dir> [--date YYYY-MM-DD] [--site DIR]` builds `<dir>/site/` (default) in plain
