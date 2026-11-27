@@ -1,0 +1,1 @@
+{"cookies_file":null,"frames_per_video":3,"max_videos_per_run":5,"output_dir":"~/workspace/yt-digest","sources":[{"kind":"channel","max_videos":3,"name":"Improving Enterprises","url":"https://www.youtube.com/@ImprovingEnterprises/videos"}],"summarizer":{"command":["claude","-p"],"prompt_file":"prompts/summarize.md"}}
