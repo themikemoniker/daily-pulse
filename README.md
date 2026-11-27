@@ -49,3 +49,9 @@ identical files.
 - **Watched repos** (`watch_repos`, e.g. `can1357/oh-my-pi`): releases only, checked first so a tight rate limit cannot starve them. Top-contributor tracking is not implemented.
 - **Rate limits**: `X-RateLimit-Remaining` is read on every response. A 403/429 rate-limit response waits out a short `Retry-After`/reset (at most 30 s) once; otherwise, or when the budget hits zero, the adapter logs a warning, stops calling the API and returns what it already has (`adapter.last_run["degraded"]`). It never raises for a rate limit.
 - Tests use recorded responses in `tests/fixtures/github/responses.json` (keyed by API path) via `--fixtures`, or an injected transport. Unauthenticated limits are 60 requests/hour, so a long watch list may degrade without a token.
+
+## Deferred sources
+
+- **X: deferred** (`deferred: no usable read route`). Blockers: no X connector exists on the host, the X API free tier cannot read other accounts' posts, and raw scraping is forbidden. To unblock: provide a connector or a paid API tier that can read the accounts, then implement `list_new`/`fetch_details` in `daily_pulse/adapters/x.py`. The seed handles stay in `[sources.x].handles`.
+- **Instagram: deferred until a CLI is configured** (`deferred: no CLI configured`). Blocker: no sanctioned read access to saved/liked reels. To unblock: set `IG_CLI_CMD` to a command that prints the JSON described in `docs/instagram-adapter.md` (saved reels first, then liked). Items carry metadata and a short caption excerpt only; they are rated through the summarizer.
+- Both modules appear in the run result with their status and never fail the run.

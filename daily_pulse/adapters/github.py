@@ -11,7 +11,6 @@ import urllib.request
 from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 
-from daily_pulse.adapters import registry
 from daily_pulse.adapters.base import AdapterContext, SourceAdapter
 from daily_pulse.models import Item
 from daily_pulse.state import atomic_write_json
@@ -290,5 +289,3 @@ class GitHubAdapter(SourceAdapter):
             for t in body
         ]
 
-
-registry.register(GitHubAdapter())
