@@ -382,3 +382,61 @@ def test_a_binary_that_cannot_start_is_not_retried_or_counted(tmp_path):
     s = Summarizer(claude_cmd=str(tmp_path / "no-such-claude"), max_calls=5)
     assert s.rate(repo_item()) is None
     assert s.calls_made == 0
+
+
+def test_non_utf8_output_counts_against_the_cap_and_is_retried(tmp_path):
+    script = tmp_path / "binary-out"
+    script.write_text("#!/bin/sh\ncat >/dev/null\nprintf '\\377\\376'\n")
+    script.chmod(0o755)
+    s = Summarizer(claude_cmd=str(script), max_calls=5)
+    assert s.rate(repo_item()) is None
+    assert s.calls_made == 2
+
+
+def test_a_timeout_counts_as_a_call(tmp_path):
+    script = tmp_path / "slow"
+    script.write_text("#!/bin/sh\nsleep 5\n")
+    script.chmod(0o755)
+    s = Summarizer(claude_cmd=str(script), timeout=0.2, max_calls=5)
+    s.rate(repo_item())
+    assert s.calls_made == 2
+
+
+def test_absurdly_nested_json_is_just_a_bad_reply(fake_claude):
+    claude = fake_claude("[" * 200000)
+    assert Summarizer(claude_cmd=str(claude.path)).rate(repo_item()) is None
+    assert claude.calls == 2
+
+
+def test_an_unserializable_item_does_not_kill_the_batch(fake_claude, tmp_path):
+    import datetime
+
+    from daily_pulse.summarizer import summarize_items
+
+    claude = fake_claude(good())
+    items = [repo_item(id="a", metrics={"when": datetime.datetime.now()}), repo_item(id="b")]
+    results = summarize_items(Summarizer(claude_cmd=str(claude.path)), items, tmp_path, "2026-01-02")
+    assert [r.status for r in results] == ["unrated", "rated"]
+
+
+def test_an_unreadable_prompt_file_leaves_items_unrated(fake_claude, tmp_path):
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "rubric.md").write_bytes(b"\xff\xfe")
+    (prompts / "summarize.md").write_text("{{ITEM}}")
+    claude = fake_claude(good())
+    s = Summarizer(claude_cmd=str(claude.path), prompts_dir=prompts)
+    assert s.rate(repo_item()) is None
+    assert claude.calls == 0
+
+
+@pytest.mark.parametrize("field,bad", [
+    ("beats", [{"timestamp": "99:99", "text": "t"}]),
+    ("beats", [{"timestamp": "05:30", "text": "  "}]),
+    ("tags", [""]),
+    ("tags", ["  "]),
+])
+def test_beats_and_tags_are_checked_so_bad_ones_get_the_retry(fake_claude, field, bad):
+    claude = fake_claude(good(**{field: bad}), good())
+    assert Summarizer(claude_cmd=str(claude.path)).rate(repo_item()) is not None
+    assert claude.calls == 2

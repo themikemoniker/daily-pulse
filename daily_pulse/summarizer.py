@@ -29,7 +29,7 @@ DEFAULT_MAX_CALLS = 30
 DEFAULT_TIMEOUT = 300.0  # seconds per call
 ATTEMPTS = 2  # the first call plus one retry
 
-_TIMESTAMP = re.compile(r"[0-9]{1,2}(:[0-9]{2}){1,2}")
+_TIMESTAMP = re.compile(r"[0-9]{1,2}:[0-5][0-9](:[0-5][0-9])?")
 _FENCE = re.compile(r"\A```[A-Za-z]*\n(.*)\n```\Z", re.S)
 
 
@@ -45,6 +45,8 @@ def _str_list(data: dict, key: str) -> list[str]:
     value = data.get(key)
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise BadReply(f"{key} must be a list of strings")
+    if key == "tags" and not all(v.strip() for v in value):
+        raise BadReply("tags must not be empty")
     return value
 
 
@@ -61,7 +63,7 @@ def parse_reply(text: str, item: Item) -> Rating:
     fenced = _FENCE.match(text)
     try:
         data = json.loads(fenced.group(1) if fenced else text)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise BadReply(f"not JSON: {exc}") from None
     if not isinstance(data, dict):
         raise BadReply("reply must be a JSON object")
@@ -81,6 +83,7 @@ def parse_reply(text: str, item: Item) -> Rating:
     parsed_beats = []
     for beat in beats:
         if not (isinstance(beat, dict) and isinstance(beat.get("text"), str)
+                and beat["text"].strip()
                 and isinstance(beat.get("timestamp"), str) and _TIMESTAMP.fullmatch(beat["timestamp"])):
             raise BadReply(f"bad beat {beat!r}")
         parsed_beats.append(Beat(beat["timestamp"], beat["text"]))
@@ -163,6 +166,9 @@ class Summarizer:
         except subprocess.TimeoutExpired:
             self.calls_made += 1
             raise CallFailed(f"timed out after {self.timeout}s") from None
+        except UnicodeError as exc:  # the process ran, but its output (or our prompt) is not text
+            self.calls_made += 1
+            raise CallFailed(f"undecodable output or prompt: {exc}") from None
         except (OSError, ValueError) as exc:  # not found, not executable, bad command string
             raise CannotRun(f"cannot run {self.claude_cmd!r}: {exc}") from None
         self.calls_made += 1
@@ -176,8 +182,8 @@ class Summarizer:
         label = f"{item.source}-{item.id}"
         try:
             prompt = self._prompt(item, transcript)
-        except OSError as exc:
-            log.error("%s: left unrated, cannot read prompts: %s", label, exc)
+        except (OSError, ValueError, TypeError) as exc:  # unreadable prompts, unserializable item
+            log.error("%s: left unrated, cannot build the prompt: %s", label, exc)
             return None
         for attempt in range(1, ATTEMPTS + 1):
             if self.calls_made >= self.max_calls:
@@ -210,7 +216,11 @@ def summarize_items(summarizer: Summarizer, items: list[Item], notes_dir: Path, 
     results = []
     for item in items:
         transcript = transcripts.get(item.id, "")
-        rating = summarizer.rate(item, transcript)
+        try:
+            rating = summarizer.rate(item, transcript)
+        except Exception:  # noqa: BLE001 - one item must never kill the batch
+            log.exception("%s-%s: left unrated, unexpected error", item.source, item.id)
+            rating = None
         if rating is not None:
             try:
                 path = write_note(item, rating, notes_dir, date, transcript)
