@@ -23,3 +23,12 @@ def test_run_on_fixtures_with_fake_adapter_exits_zero_and_reports_items(make_env
     assert res["sources"]["fake"]["status"] == "ok"
     assert [i["id"] for i in res["sources"]["fake"]["items"]] == ["a1", "a2"]
     assert res["sources"]["fake"]["items"][0]["text"] == "excerpt for a1"
+
+
+def test_second_run_with_same_state_finds_nothing_new(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+    assert run(cfg, out, fixtures_dir) == 0
+    assert result(out)["sources"]["fake"]["items"] == []
