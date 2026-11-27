@@ -22,6 +22,16 @@ A daily trends digest. Under construction; see the spec issue.
 - Full transcripts and captions are written only by `write_transcript(data_dir, item, text)` to `<data_dir>/transcripts/`, never to `notes/`. Title, author and tags are guarded too, and matching ignores case, curly apostrophes, markdown underscores, zero-width characters and caption markup.
 - `daily_pulse.quoteguard` enforces the limits: a run of more than 40 consecutive words matching the local transcript/caption (or the item's excerpt) is cut to a 20-word snippet, and all quoted words in a note (the `quotes` list, shown as blockquotes, plus quoted spans and any lifted run of 8+ words in free text) share a budget of 49.
 
+## Daily digest
+
+`daily-pulse digest --out <dir> [--date YYYY-MM-DD] [--base-url URL]` builds `<dir>/digests/<date>.md` and
+`<date>.html` from the notes in `<dir>/notes/<date>/` and the source statuses in `<dir>/run-<date>.json`.
+Items are ranked by rating (newest first on ties); items rated 9+ and under 48 hours old are repeated in a
+"Diamonds in the rough" section at the top. The HTML is email-ready (inline styles, table layout, no external
+CSS/JS); links are absolute, built from `site.base_url` in the config. Item ages are measured from the run's
+`generated_at` (recorded in `run-<date>.json`; falls back to the end of the date, UTC), so rebuilding a date gives
+identical files.
+
 ## Summarizer
 
 - `daily_pulse.summarizer.Summarizer` rates one item by running `claude -p` with the prompt on stdin: `prompts/rubric.md` (the rubric, in every call) plus `prompts/summarize.md` (the task and the strict-JSON reply format). Both files are read on every call, so editing them needs no code change. `summarize_items(summarizer, items, notes_dir, date, transcripts=None)` rates each item and passes the result to `write_note`.

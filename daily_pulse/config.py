@@ -17,6 +17,7 @@ class Config:
     data_dir: Path
     first_run_cap: int = 10
     alert_after_failures: int = 2
+    base_url: str = ""  # public site root; digest links are built from it
     sources: dict[str, dict] = field(default_factory=dict)
     claude_cmd: str = "claude"
     max_claude_calls: int = 30
@@ -44,6 +45,10 @@ def load_config(path: Path) -> Config:
     path = Path(path)
     raw = tomllib.loads(path.read_text())
     run, paths, sources = _table(raw, "run"), _table(raw, "paths"), _table(raw, "sources")
+    site = _table(raw, "site")
+    base_url = site.get("base_url", "")
+    if not isinstance(base_url, str):
+        raise ConfigError(f"site.base_url must be a string, got {base_url!r}")
     summarizer = _table(raw, "summarizer")
     claude_cmd = summarizer.get("claude_cmd", "claude")
     if not isinstance(claude_cmd, str) or not claude_cmd.strip():
@@ -60,6 +65,7 @@ def load_config(path: Path) -> Config:
         data_dir=path.parent / data_dir,
         first_run_cap=_int(run, "first_run_cap", 10, 0, "run.first_run_cap"),
         alert_after_failures=_int(run, "alert_after_failures", 2, 1, "run.alert_after_failures"),
+        base_url=base_url.strip(),
         sources=sources,
         claude_cmd=claude_cmd,
         max_claude_calls=_int(summarizer, "max_calls", 30, 0, "summarizer.max_calls"),
