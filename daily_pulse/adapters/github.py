@@ -86,7 +86,7 @@ class GitHubAdapter(SourceAdapter):
         self._transport = transport  # callable(path, params) -> (status, headers, body)
         self._sleep = sleep
         self._clock = clock
-        self._exhausted = ""
+        self._exhausted: dict = {}
         self.last_run: dict = {"degraded": False, "reason": ""}
 
     def _now(self, ctx: AdapterContext) -> datetime:
@@ -98,11 +98,14 @@ class GitHubAdapter(SourceAdapter):
         Retry-After (once) first."""
         transport = self._transport or (
             FixtureTransport(ctx.fixtures_dir) if ctx.fixtures_dir else UrllibTransport())
+        path_bucket = "search" if path.startswith("/search") else "core"
         for attempt in (1, 2):
-            if self._exhausted:
-                raise RateLimited(self._exhausted)
+            if path_bucket in self._exhausted:
+                raise RateLimited(self._exhausted[path_bucket])
             status, headers, body = transport(path, params or {})
             headers = {k.lower(): str(v) for k, v in headers.items()}
+            # Search has its own small budget; only the bucket that hit zero is exhausted.
+            bucket = headers.get("x-ratelimit-resource", path_bucket)
             remaining = headers.get("x-ratelimit-remaining")
             limited = status == 429 or (status == 403 and (
                 remaining == "0" or "rate limit" in str(body.get("message", "") if isinstance(body, dict) else "").lower()))
@@ -112,12 +115,16 @@ class GitHubAdapter(SourceAdapter):
                     log.warning("github: rate limited on %s, waiting %ss", path, wait)
                     self._sleep(wait)
                     continue
-                self._exhausted = f"rate limit hit on {path} (HTTP {status})"
-                raise RateLimited(self._exhausted)
+                self._exhausted[bucket] = f"rate limit hit on {path} (HTTP {status})"
+                raise RateLimited(self._exhausted[bucket])
             if remaining is not None and remaining.isdigit() and int(remaining) < MIN_REMAINING:
-                self._exhausted = "rate limit exhausted (X-RateLimit-Remaining=0)"
+                self._exhausted[bucket] = f"rate limit exhausted ({bucket}: X-RateLimit-Remaining=0)"
+            if status != 200:
+                log.warning("github: HTTP %s on %s", status, path)
+                if status in (401, 404, 422):
+                    self._errors.append(f"HTTP {status} on {path}")
             return status, body
-        raise RateLimited(self._exhausted)
+        raise RateLimited(self._exhausted.get(path_bucket, "rate limited"))
 
     def _wait_seconds(self, headers: dict) -> float | None:
         if headers.get("retry-after", "").isdigit():
@@ -129,7 +136,8 @@ class GitHubAdapter(SourceAdapter):
     def list_new(self, ctx: AdapterContext) -> list[Item]:
         cfg = ctx.config
         now = self._now(ctx)
-        self._exhausted = ""
+        self._exhausted = {}
+        self._errors = []
         self.last_run = {"degraded": False, "reason": ""}
         self._stars = self._load_stars(ctx)
         items: list[Item] = []
@@ -151,8 +159,13 @@ class GitHubAdapter(SourceAdapter):
         finally:
             self._save_stars(ctx)
         if self._exhausted and not self.last_run["degraded"]:
-            log.warning("github: %s; remaining requests skipped", self._exhausted)
-            self.last_run = {"degraded": True, "reason": self._exhausted}
+            reason = "; ".join(self._exhausted.values())
+            log.warning("github: %s; remaining requests skipped", reason)
+            self.last_run = {"degraded": True, "reason": reason}
+        if self._errors and not self.last_run["degraded"]:
+            reason = f"{len(self._errors)} failed request(s), first: {self._errors[0]}"
+            log.warning("github: degraded: %s", reason)
+            self.last_run = {"degraded": True, "reason": reason}
         items.sort(key=lambda i: i.published, reverse=True)
         return items
 
@@ -219,7 +232,7 @@ class GitHubAdapter(SourceAdapter):
                 self._repo(ctx, now, r, items, lookback, push_days)
             except RateLimited:
                 raise
-            except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            except (KeyError, TypeError, ValueError, AttributeError, OSError) as exc:
                 log.warning("github: skipped a malformed repo entry from %s: %s", account, exc)
 
     def _repo(self, ctx, now, r, items, lookback, push_days) -> None:

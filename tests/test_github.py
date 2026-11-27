@@ -95,12 +95,15 @@ def test_rate_limit_403_degrades_with_log_and_keeps_earlier_items(make_env, fixt
 
 
 def test_remaining_zero_on_success_stops_further_requests(make_env, fixtures_dir):
-    set_response(fixtures_dir, "/search/repositories", 200, {"items": []},
+    body = json.loads((fixtures_dir / "github/responses.json").read_text())["/repos/bob/tool/releases"]["body"]
+    set_response(fixtures_dir, "/repos/bob/tool/releases", 200, body,
                  {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "4102444800"})
     adapter = GitHubAdapter()
     registry.register(adapter)
     _, res = run(make_env, fixtures_dir)
-    assert set(items_by_id(res)) == {"release:bob/tool:v0.3.0"}  # nothing after the budget ran out
+    ids = set(items_by_id(res))  # core budget spent: no account calls; search has its own budget
+    assert "release:bob/tool:v0.3.0" in ids and "rising:other/gizmo" in ids
+    assert not any(i.endswith("alice/proj:v1.2.0") for i in ids)
     assert adapter.last_run["degraded"] is True
 
 
@@ -324,3 +327,44 @@ def test_watch_repos_are_checked_before_accounts_so_rate_limit_cannot_starve_the
                  {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "4102444800"})
     _, res = run(make_env, fixtures_dir)
     assert "release:bob/tool:v0.3.0" in items_by_id(res)
+
+
+# -- code review round 1 --------------------------------------------------------------------
+
+def fixture_transport_with(fixtures_dir, override):
+    from daily_pulse.adapters.github import FixtureTransport
+    base = FixtureTransport(fixtures_dir)
+
+    def transport(path, params):
+        return override(path) or base(path, params)
+
+    return transport
+
+
+def test_network_error_on_one_repo_does_not_drop_the_accounts_other_repos(make_env, fixtures_dir):
+    def boom(path):
+        if path == "/repos/alice/proj/releases":
+            raise TimeoutError("timed out")
+
+    registry.register(GitHubAdapter(transport=fixture_transport_with(fixtures_dir, boom)))
+    _, res = run(make_env, fixtures_dir)
+    ids = set(items_by_id(res))
+    assert "push:alice/active:2026-01-14" in ids and "repo:alice/brand-new" in ids
+
+
+def test_unauthorized_on_every_call_is_logged_and_marks_the_run_degraded(make_env, fixtures_dir, caplog):
+    adapter = GitHubAdapter(transport=lambda path, params: (401, {}, {"message": "Bad credentials"}))
+    registry.register(adapter)
+    with caplog.at_level("WARNING", logger="daily_pulse"):
+        code, res = run(make_env, fixtures_dir)
+    assert code == 0 and res["sources"]["github"]["items"] == []
+    assert adapter.last_run["degraded"] is True and "401" in adapter.last_run["reason"]
+    assert "401" in caplog.text and "/search/repositories" in caplog.text
+
+
+def test_search_bucket_at_zero_does_not_block_core_calls(make_env, fixtures_dir):
+    set_response(fixtures_dir, "/search/repositories", 200, {"items": []},
+                 {"X-RateLimit-Remaining": "0", "X-RateLimit-Resource": "search",
+                  "X-RateLimit-Reset": "4102444800"})
+    _, res = run(make_env, fixtures_dir)
+    assert "release:alice/proj:v1.2.0" in items_by_id(res)
