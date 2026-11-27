@@ -96,7 +96,7 @@ def test_failures_exit_nonzero_with_a_short_message_and_no_account_id(run, tmp_p
     assert proc.returncode == 1 and "IG_EXPORT_LIMIT" in proc.stderr
 
 
-def test_the_output_satisfies_the_adapter(run, tmp_path):
+def test_the_output_satisfies_the_adapter(run, tmp_path, monkeypatch):
     from daily_pulse.adapters.base import AdapterContext
     from daily_pulse.adapters.instagram import InstagramAdapter
 
@@ -105,9 +105,49 @@ def test_the_output_satisfies_the_adapter(run, tmp_path):
     shim = tmp_path / "shim"
     shim.write_text(f"#!/bin/sh\ncat <<'EOF'\n{proc.stdout}EOF\n")
     shim.chmod(0o755)
-    os.environ["IG_CLI_CMD"] = str(shim)
-    try:
-        items = InstagramAdapter().list_new(AdapterContext(config={}))
-    finally:
-        del os.environ["IG_CLI_CMD"]
+    monkeypatch.setenv("IG_CLI_CMD", str(shim))
+    items = InstagramAdapter().list_new(AdapterContext(config={}))
     assert [i.id for i in items] == ["S1", "L1"]
+
+
+def test_a_reel_both_saved_and_liked_is_exported_once_saved_wins(run):
+    data = {"saved-posts": {"0": {"posts": [post("DUP")]}}, "recently-liked-posts": {"0": {"posts": [post("DUP"), post("L2")]}}}
+    out = json.loads(run(data)[0].stdout)
+    assert [(e["shortcode"], e["source"]) for e in out] == [("DUP", "saved"), ("L2", "liked")]
+
+
+def test_the_limit_counts_reels_not_photos(run):
+    photos = [post(f"P{i}", kind="post") for i in range(25)]
+    data = {"saved-posts": {"0": {"posts": photos, "has_next_page": True, "end_cursor": "c1"},
+                            "c1": {"posts": [post("R1"), post("R2")], "has_next_page": False}},
+            "recently-liked-posts": {"0": {"posts": []}}}
+    out = json.loads(run(data, {"IG_EXPORT_LIMIT": "2"})[0].stdout)
+    assert [e["shortcode"] for e in out] == ["R1", "R2"]  # twenty-five photos did not use the limit up
+
+
+def test_a_millisecond_or_absurd_timestamp_never_aborts_the_export(run):
+    data = {"saved-posts": {"0": {"posts": [post("R1", post_creation_time=1768384800000),
+                                            post("R2", post_creation_time=1e300)]}},
+            "recently-liked-posts": {"0": {"posts": []}}}
+    proc, _ = run(data)
+    out = json.loads(proc.stdout)
+    assert out[0]["timestamp"] == "2026-01-14T10:00:00Z" and "timestamp" not in out[1]
+
+
+def test_a_changed_response_shape_is_an_error_not_an_empty_export(run):
+    proc, _ = run({"saved-posts": {"0": {"items": []}}, "recently-liked-posts": {"0": {"posts": []}}})
+    assert proc.returncode == 1 and "no posts list" in proc.stderr
+
+
+def test_a_post_without_a_type_is_not_assumed_to_be_a_reel(run):
+    untyped = post("U1")
+    del untyped["post_type"]
+    data = {"saved-posts": {"0": {"posts": [untyped]}}, "recently-liked-posts": {"0": {"posts": []}}}
+    assert json.loads(run(data)[0].stdout) == []
+
+
+def test_connector_stderr_that_echoes_the_account_id_is_scrubbed(run, tmp_path):
+    cli = tmp_path / "instagram-cli"
+    cli.write_text(f"#!/bin/sh\necho 'no access to account {ACCOUNT}' >&2\nexit 1\n")
+    proc, _ = run({}, {"INSTAGRAM_CLI": str(cli)})
+    assert proc.returncode == 1 and ACCOUNT not in proc.stderr and "<account>" in proc.stderr

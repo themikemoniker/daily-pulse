@@ -19,19 +19,26 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timezone
+from typing import NoReturn
 
 PAGE = 25
-SHORTCODE = re.compile(r"/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)")
+SHORTCODE = re.compile(r"/(?:reel|reels)/([A-Za-z0-9_-]+)")
 
 
-def fail(message: str) -> None:
+ACCOUNT = ""  # set in main(); scrubbed from every message so the id is never printed
+
+
+def fail(message: str) -> NoReturn:
+    if ACCOUNT:
+        message = message.replace(ACCOUNT, "<account>")
     print(f"ig-export: {message}", file=sys.stderr)
     sys.exit(1)
 
 
 def call(cli: str, args: list[str]) -> dict:
     try:
-        proc = subprocess.run([cli, *args], capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        proc = subprocess.run([cli, *args], capture_output=True, text=True, errors="replace", timeout=120,
+                              stdin=subprocess.DEVNULL)
     except FileNotFoundError:
         fail(f"{os.path.basename(cli)} not found: set INSTAGRAM_CLI to the connector executable")
     except (OSError, subprocess.TimeoutExpired):
@@ -47,34 +54,45 @@ def call(cli: str, args: list[str]) -> dict:
     return data
 
 
-def list_posts(cli: str, account: str, command: str, limit: int) -> list[dict]:
-    """Page through one list, newest first, stopping at `limit`, a repeated cursor or the last page."""
-    posts, after, seen = [], None, set()
-    while len(posts) < limit:
-        args = [command, "--account-id", account, "--limit", str(min(limit - len(posts), PAGE))]
+def list_entries(cli: str, account: str, command: str, source: str, limit: int, taken: set) -> list[dict]:
+    """Page through one list, newest first, keeping reels. `limit` counts kept entries, so photos and
+    carousels never use it up; stops at the limit, a repeated cursor or the last page. A shortcode
+    already in `taken` (saved wins over liked) is skipped."""
+    out, after, seen = [], None, set()
+    while len(out) < limit:
+        args = [command, "--account-id", account, "--limit", str(PAGE)]
         if after:
             args += ["--after", after]
         data = call(cli, args)
         batch = data.get("posts")
-        if not isinstance(batch, list) or not batch:
-            break
-        posts.extend(p for p in batch if isinstance(p, dict))
+        if not isinstance(batch, list):
+            fail(f"{os.path.basename(cli)} {command} returned no posts list (did the connector change?)")
+        for post in batch:
+            e = entry(post, source) if isinstance(post, dict) else None
+            if e and e["shortcode"] not in taken and len(out) < limit:
+                taken.add(e["shortcode"])
+                out.append(e)
         after = data.get("end_cursor")
-        if not data.get("has_next_page") or not isinstance(after, str) or not after or after in seen:
+        if not batch or not data.get("has_next_page") or not isinstance(after, str) or not after or after in seen:
             break
         seen.add(after)
-    return posts[:limit]
+    return out
 
 
 def timestamp(value) -> str | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-        return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if value > 1e11:  # milliseconds
+            value /= 1000
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, OverflowError, OSError):
+            return None
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def entry(post: dict, source: str) -> dict | None:
     """One adapter entry, or None for anything that is not a reel with a usable link."""
-    if str(post.get("post_type") or "reel").lower() != "reel":
+    if str(post.get("post_type") or "").lower() != "reel":
         return None
     url = post.get("media_permalink")
     match = SHORTCODE.search(url) if isinstance(url, str) else None
@@ -97,16 +115,17 @@ def entry(post: dict, source: str) -> dict | None:
 
 
 def main() -> int:
-    account = os.environ.get("IG_ACCOUNT_ID", "").strip()
+    global ACCOUNT
+    account = ACCOUNT = os.environ.get("IG_ACCOUNT_ID", "").strip()
     if not account:
         fail("IG_ACCOUNT_ID is not set (find it with `instagram-cli accounts`)")
     cli = os.environ.get("INSTAGRAM_CLI", "").strip() or "instagram-cli"
     raw = os.environ.get("IG_EXPORT_LIMIT", "").strip() or "20"
     if not raw.isdigit() or int(raw) < 1:
         fail("IG_EXPORT_LIMIT must be a whole number >= 1")
-    limit, entries = int(raw), []
+    limit, entries, taken = int(raw), [], set()
     for source, command in (("saved", "saved-posts"), ("liked", "recently-liked-posts")):
-        entries += [e for e in (entry(p, source) for p in list_posts(cli, account, command, limit)) if e]
+        entries += list_entries(cli, account, command, source, limit, taken)
     json.dump(entries, sys.stdout, ensure_ascii=False)
     print()
     return 0
