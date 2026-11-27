@@ -190,3 +190,15 @@ def test_shipped_config_reports_x_and_instagram_deferred(tmp_path, monkeypatch):
     empty.mkdir()
     assert main(["run", "--config", str(cfg), "--fixtures", str(empty), "--out", str(out),
                  "--date", "2026-01-15", "--dry-run"]) == 0
+
+
+def test_null_optional_fields_are_accepted_and_filtered_kinds_are_not_malformed(
+        make_env, fixtures_dir, tmp_path, monkeypatch):
+    payload = [{**entry("S1", "saved"), "caption": None, "author": None}, entry("L1", "liked")]
+    cmd = fake_ig_cmd(tmp_path, json.dumps(payload))
+    cfg, data, out = ig_env(make_env, monkeypatch, cmd,
+                            extra='[sources.instagram]\nenabled = true\nkinds = ["saved"]\n')
+    (fixtures_dir / "instagram" / "items.json").unlink()
+    assert run(cfg, out, fixtures_dir) == 0
+    assert [i["id"] for i in result(out)["sources"]["instagram"]["items"]] == ["S1"]
+    assert "malformed" not in (data / "logs" / "run-2026-01-15.log").read_text().lower()

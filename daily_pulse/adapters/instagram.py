@@ -23,7 +23,7 @@ def _excerpt(caption: str) -> str:
     return " ".join(words[:EXCERPT_WORDS]) + (" …" if len(words) > EXCERPT_WORDS else "")
 
 
-def parse_entries(text: str, kinds=KINDS) -> list[dict]:
+def parse_entries(text: str) -> list[dict]:
     """Valid entries from the command's JSON. Anything malformed is logged and skipped."""
     try:
         raw = json.loads(text)
@@ -39,8 +39,8 @@ def parse_entries(text: str, kinds=KINDS) -> list[dict]:
             isinstance(e, dict)
             and isinstance(e.get("shortcode"), str) and e["shortcode"].strip()
             and isinstance(e.get("url"), str) and e["url"]
-            and e.get("source") in kinds
-            and all(isinstance(e.get(k, ""), str) for k in ("author", "caption", "timestamp"))
+            and e.get("source") in KINDS
+            and all(e.get(k) is None or isinstance(e[k], str) for k in ("author", "caption", "timestamp"))
         )
         if ok:
             good.append(e)
@@ -54,7 +54,6 @@ class InstagramAdapter(SourceAdapter):
 
     def __init__(self) -> None:
         self.captions: dict[str, str] = {}  # full captions, for the summarizer only
-        self._items: dict[str, Item] = {}
 
     @staticmethod
     def _command(ctx: AdapterContext) -> list[str]:
@@ -86,7 +85,7 @@ class InstagramAdapter(SourceAdapter):
 
     def list_new(self, ctx: AdapterContext) -> list[Item]:
         kinds = [k for k in ctx.config.get("kinds", KINDS) if k in KINDS] or list(KINDS)
-        entries = parse_entries(self._read(ctx), kinds)
+        entries = [e for e in parse_entries(self._read(ctx)) if e["source"] in kinds]
         entries.sort(key=lambda e: kinds.index(e["source"]))  # stable: saved first, then liked
         items, seen = [], set()
         for e in entries:
@@ -94,11 +93,11 @@ class InstagramAdapter(SourceAdapter):
             if code in seen:
                 continue
             seen.add(code)
-            author = e.get("author", "")
-            self.captions[code] = e.get("caption", "")
+            author = e.get("author") or ""
+            self.captions[code] = e.get("caption") or ""
             items.append(Item(source=self.name, id=code, url=e["url"],
                               title=f"Reel by {author or 'unknown'} ({code})", author=author,
-                              published=e.get("timestamp", ""), metrics={"source": e["source"]}))
+                              published=e.get("timestamp") or "", metrics={"source": e["source"]}))
         return items
 
     def fetch_details(self, item: Item, ctx: AdapterContext) -> Item:
