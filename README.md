@@ -1,8 +1,64 @@
 # daily-pulse
 
-A daily trends digest. Under construction; see the spec issue.
+A daily trends digest for one reader. Once a day it collects new items from YouTube, Instagram, X and GitHub,
+rates each against a rubric (`prompts/rubric.md`) with `claude -p`, writes one note per item, builds a ranked
+digest (markdown and email-ready HTML) and a static site, and publishes the site to the `gh-pages` branch.
+Live site: https://themikemoniker.github.io/daily-pulse/. Python 3.11+, standard library only at runtime.
+
+Source status in v1: **YouTube** is collected, rated and noted end to end. **GitHub** and **Instagram** items are
+collected and appear in the run result (`run-<date>.json`), but the runner does not rate or write notes for them
+yet, so they do not reach the digest or the site. **X** is deferred (see [Deferred sources](#deferred-sources)).
+
+## Setup
+
+    python3 -m virtualenv .venv && .venv/bin/pip install -e '.[dev]'    # or: python3 -m venv .venv
+    scripts/install-ytdlp.sh                                           # yt-dlp into .venv/bin/yt-dlp, no sudo
+
+1. **Install yt-dlp** with `scripts/install-ytdlp.sh`, then set `ytdlp_cmd = "/path/to/repo/.venv/bin/yt-dlp"` under
+   `[sources.youtube]` (cron has a short PATH) or export `DAILY_PULSE_YTDLP`, which wins over the config.
+2. **Configure sources and accounts** in `config/daily-pulse.toml`: `[sources.youtube] playlist_url`;
+   `[sources.github] watch_accounts` / `watch_repos` / `rising_days`; `[sources.x] handles` (stored for later);
+   `[sources.instagram] kinds`. Each source has `enabled`. Adding an account is a one-line edit. Other tables:
+   `[run]` (`first_run_cap`, `alert_after_failures`), `[paths] data_dir`, `[site] base_url`, `[summarizer]`
+   (`claude_cmd`, `max_calls`) and `[quality]` (see [Quality gate](#quality-gate)).
+3. **Environment** (never in the config or the repo): `GITHUB_TOKEN` (optional, higher GitHub rate limits),
+   `IG_CLI_CMD` (the Instagram command), `DAILY_PULSE_CLAUDE` (overrides `claude_cmd`), `DAILY_PULSE_YTDLP`.
+4. `claude` must be on the PATH of whatever runs the pipeline; it uses your Claude subscription, no API key.
+
+## Privacy rules
+
+- Transcripts, captions, processed-ID state, triage logs and run logs stay under `data/` (gitignored, never
+  pushed). `publish` refuses a site that contains the data directory, a dotfile, a symlink, an unexpected file type
+  or anything that looks like a secret.
+- Notes, digests and the site carry own-words summaries, ratings, verdicts, tags and links only. Quotes are short:
+  under 50 quoted words per item in total, enforced by `daily_pulse/quoteguard.py`.
+- `main` holds code, prompts and docs only; the cron job writes only the `gh-pages` branch.
+
+## Tests
+
+    .venv/bin/pytest -q
+
+`tests/test_e2e.py` runs `run`, `digest`, `site` and `publish` through the real CLI on recorded fixtures (no
+network, a fake `claude`, a local bare git remote) and checks that a second run finds nothing new and changes no
+output, and that one failing source does not hide the others. Tests never call the network, `yt-dlp` or `claude`.
+
+## Backlog (v2, not built)
+
+Frame grabs with ffmpeg at key beats; thought-leader and account discovery; thumbs up/down curation; an X read
+route; a real Instagram CLI satisfying `docs/instagram-adapter.md`; Whisper transcription for reels; rating and
+noting GitHub and Instagram items in the runner. Tracked in the "v2 backlog" issue.
 
 ## Running
+
+    .venv/bin/daily-pulse run --out DIR [--config FILE] [--date YYYY-MM-DD] [--fixtures DIR] [--dry-run]
+    .venv/bin/daily-pulse digest --out DIR [--config FILE] [--date YYYY-MM-DD] [--base-url URL]
+    .venv/bin/daily-pulse site --out DIR [--date YYYY-MM-DD] [--site DIR]
+    .venv/bin/daily-pulse publish [--out DIR] [--site DIR] [--remote URL] [--branch gh-pages] [--no-build]
+
+`scripts/run-daily.sh` chains `run`, `digest` and `publish`; see [Publishing and the daily cron job](#publishing-and-the-daily-cron-job)
+for the cron line. A dry run against recorded inputs:
+
+    .venv/bin/daily-pulse run --fixtures tests/fixtures --out /tmp/dp-out --dry-run
 
     .venv/bin/daily-pulse run --fixtures tests/fixtures --out /tmp/dp-out [--date YYYY-MM-DD] [--dry-run] [--config config/daily-pulse.toml]
 
@@ -18,7 +74,7 @@ A daily trends digest. Under construction; see the spec issue.
 
 ## Notes and privacy guards
 
-- `daily_pulse.notes.write_note(item, rating, notes_dir, date, transcript="")` writes `<notes_dir>/<date>/<source>-<id>.md` (frontmatter plus body; videos get takeaways, a timestamped argument, rating, verdict; github/instagram/x get summary, rating, reason, verdict, tags). Rewriting the same item gives the identical file. An invalid rating (not 1-10, unknown verdict, no reason, bad beat timestamp) raises `NoteError` and writes nothing. Not yet called by the runner; the summarizer and digest tickets plug into it.
+- `daily_pulse.notes.write_note(item, rating, notes_dir, date, transcript="")` writes `<notes_dir>/<date>/<source>-<id>.md` (frontmatter plus body; videos get takeaways, a timestamped argument, rating, verdict; github/instagram/x get summary, rating, reason, verdict, tags). Rewriting the same item gives the identical file. An invalid rating (not 1-10, unknown verdict, no reason, bad beat timestamp) raises `NoteError` and writes nothing. The runner calls it for YouTube items only so far.
 - Full transcripts and captions are written only by `write_transcript(data_dir, item, text)` to `<data_dir>/transcripts/`, never to `notes/`. Title, author and tags are guarded too, and matching ignores case, curly apostrophes, markdown underscores, zero-width characters and caption markup.
 - `daily_pulse.quoteguard` enforces the limits: a run of more than 40 consecutive words matching the local transcript/caption (or the item's excerpt) is cut to a 20-word snippet, and all quoted words in a note (the `quotes` list, shown as blockquotes, plus quoted spans and any lifted run of 8+ words in free text) share a budget of 49.
 
@@ -38,7 +94,7 @@ identical files.
 - The reply must be one JSON object: summary, takeaways, beats (with timestamps), rating (integer 1-10), reason, verdict (`watch`, `skim` or `skip`), tags, diamond flag with reason, optional quotes. An invalid reply, a failed or timed-out process, or a note the writer refuses leaves that item "unrated" (logged) and the run carries on. A malformed reply is retried once.
 - `[summarizer] max_calls` (default 30) caps `claude -p` calls per run, retries included. Once reached, remaining items are unrated.
 - The binary is `[summarizer] claude_cmd` or, if set, `$DAILY_PULSE_CLAUDE` (a command string; tests point it at a fake script). Tests never run the real `claude`.
-- Returned ratings pass through the quote guard against the transcript and the item excerpt: no run of more than 40 copied words, and quoted words capped under 50 per item. Not yet called by the runner; the digest ticket plugs in.
+- Returned ratings pass through the quote guard against the transcript and the item excerpt: no run of more than 40 copied words, and quoted words capped under 50 per item. The runner calls it for YouTube items only so far.
 
 ## YouTube source
 
