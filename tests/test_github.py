@@ -352,13 +352,13 @@ def test_network_error_on_one_repo_does_not_drop_the_accounts_other_repos(make_e
     assert "push:alice/active:2026-01-14" in ids and "repo:alice/brand-new" in ids
 
 
-def test_unauthorized_on_every_call_is_logged_and_marks_the_run_degraded(make_env, fixtures_dir, caplog):
+def test_unauthorized_on_every_call_is_logged_and_fails_the_source(make_env, fixtures_dir, caplog):
     adapter = GitHubAdapter(transport=lambda path, params: (401, {}, {"message": "Bad credentials"}))
     registry.register(adapter)
     with caplog.at_level("WARNING", logger="daily_pulse"):
         code, res = run(make_env, fixtures_dir)
     assert code == 0 and res["sources"]["github"]["items"] == []
-    assert adapter.last_run["degraded"] is True and "401" in adapter.last_run["reason"]
+    assert res["sources"]["github"]["status"] == "failed" and "401" in res["sources"]["github"]["error"]
     assert "401" in caplog.text and "/search/repositories" in caplog.text
 
 
@@ -368,3 +368,31 @@ def test_search_bucket_at_zero_does_not_block_core_calls(make_env, fixtures_dir)
                   "X-RateLimit-Reset": "4102444800"})
     _, res = run(make_env, fixtures_dir)
     assert "release:alice/proj:v1.2.0" in items_by_id(res)
+
+
+# -- code review round 2 --------------------------------------------------------------------
+
+def test_search_rate_limit_does_not_stop_the_watched_accounts(make_env, fixtures_dir):
+    set_response(fixtures_dir, "/search/repositories", 403, {"message": "API rate limit exceeded"},
+                 {"X-RateLimit-Remaining": "0", "X-RateLimit-Resource": "search",
+                  "X-RateLimit-Reset": "4102444800"})
+    adapter = GitHubAdapter()
+    registry.register(adapter)
+    _, res = run(make_env, fixtures_dir)
+    ids = set(items_by_id(res))
+    assert "release:alice/proj:v1.2.0" in ids and not any(i.startswith("rising:") for i in ids)
+    assert adapter.last_run["degraded"] is True
+
+
+@pytest.mark.parametrize("kind", ["unreachable", "503"])
+def test_total_outage_reports_the_source_failed(make_env, fixtures_dir, kind):
+    def down(path, params):
+        if kind == "503":
+            return 503, {}, {"message": "unavailable"}
+        raise urllib.error.URLError("network is unreachable")
+
+    registry.register(GitHubAdapter(transport=down))
+    code, res = run(make_env, fixtures_dir)
+    assert code == 0
+    assert res["sources"]["github"]["status"] == "failed"
+    assert kind in res["sources"]["github"]["error"]

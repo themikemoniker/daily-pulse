@@ -87,6 +87,8 @@ class GitHubAdapter(SourceAdapter):
         self._sleep = sleep
         self._clock = clock
         self._exhausted: dict = {}
+        self._errors: list = []
+        self._stars: dict = {}
         self.last_run: dict = {"degraded": False, "reason": ""}
 
     def _now(self, ctx: AdapterContext) -> datetime:
@@ -121,7 +123,7 @@ class GitHubAdapter(SourceAdapter):
                 self._exhausted[bucket] = f"rate limit exhausted ({bucket}: X-RateLimit-Remaining=0)"
             if status != 200:
                 log.warning("github: HTTP %s on %s", status, path)
-                if status in (401, 404, 422):
+                if status in (401, 404, 422) or status >= 500:
                     self._errors.append(f"HTTP {status} on {path}")
             return status, body
         raise RateLimited(self._exhausted.get(path_bucket, "rate limited"))
@@ -146,18 +148,29 @@ class GitHubAdapter(SourceAdapter):
         stages = [lambda r=r: items.extend(self._releases(ctx, now, r)) for r in cfg.get("watch_repos", [])]
         stages.append(lambda: items.extend(self._rising(ctx, now, int(cfg.get("rising_days", 7)))))
         stages += [lambda a=a: self._account(ctx, now, a, items) for a in cfg.get("watch_accounts", [])]
+        failed = 0
         try:
             for stage in stages:
+                errors_before = len(self._errors)
                 try:
                     stage()
                 except RateLimited as exc:
-                    log.warning("github: degraded, returning %d item(s) found so far: %s", len(items), exc)
+                    # Only the exhausted bucket is closed (_get refuses it); later stages that
+                    # use the other bucket still run.
+                    log.warning("github: degraded, rate limited after %d item(s): %s", len(items), exc)
                     self.last_run = {"degraded": True, "reason": str(exc)}
-                    break
+                    continue
                 except Exception as exc:  # noqa: BLE001 - one bad call must not lose the rest
                     log.warning("github: skipped one lookup: %s: %s", type(exc).__name__, exc)
+                    self._errors.append(f"{type(exc).__name__}: {exc}")
+                    failed += 1
+                    continue
+                if len(self._errors) > errors_before:
+                    failed += 1
         finally:
             self._save_stars(ctx)
+        if stages and failed == len(stages):
+            raise RuntimeError(f"github: every lookup failed, first: {self._errors[0]}")
         if self._exhausted and not self.last_run["degraded"]:
             reason = "; ".join(self._exhausted.values())
             log.warning("github: %s; remaining requests skipped", reason)
