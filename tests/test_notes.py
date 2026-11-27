@@ -181,3 +181,16 @@ def test_note_text_is_collapsed_to_single_lines(tmp_path):
     rating = video_rating(reason="line one\nline two")
     text = write_note(video_item(), rating, tmp_path / "notes", DATE).read_text()
     assert "**8/10** — line one line two" in text
+
+
+def test_total_words_lifted_from_the_transcript_stay_under_fifty_across_all_fields(tmp_path):
+    from daily_pulse.quoteguard import copied_word_count
+    copied = " ".join(f"word{i}" for i in range(5, 65))
+    rating = video_rating(
+        quotes=[copied, copied],
+        takeaways=[f"He explains {copied}"] * 5,
+        beats=[Beat("01:00", copied), Beat("02:00", copied)],
+        reason=copied,
+    )
+    text = write_note(video_item(), rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT).read_text()
+    assert copied_word_count(text, TRANSCRIPT) <= 49

@@ -3,8 +3,8 @@
 Two rules, enforced in code:
 - no more than MAX_COPY_RUN consecutive words may match the local reference text; a longer
   copied run is cut down to a SNIPPET_WORDS snippet followed by an ellipsis;
-- the words inside quotation marks (explicit quotes and quoted spans in free text) share one
-  per-item budget that stays under 50.
+- the words inside quotation marks (explicit quotes and quoted spans in free text) and any
+  lifted run of MIN_COPY_RUN+ words in free text share one per-item budget that stays under 50.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ MAX_COPY_RUN = 40  # more than this many consecutive matching words is rejected
 SNIPPET_WORDS = 20  # a copied run is truncated to this many words
 MAX_QUOTED_WORDS = 49  # total quoted words per item
 MAX_QUOTE_WORDS = 25  # one explicit quote
+MIN_COPY_RUN = 12  # a matching run this long counts as lifted text and spends the budget
 
 _WORD = re.compile(r"\w+(?:'\w+)*")
 _TIMESTAMP = re.compile(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\]?")
@@ -72,7 +73,23 @@ class QuoteBudget:
         return " ".join(words[:granted]) + (ELLIPSIS if granted < len(words) else "")
 
 
-def _truncate_copied_runs(text: str, reference: str) -> str:
+def copied_word_count(text: str, reference: str, min_run: int = MIN_COPY_RUN) -> int:
+    """Words of `text` that sit inside a verbatim run of at least `min_run` words of `reference`."""
+    ref = _ref_words(reference)
+    index = _index(ref)
+    words = [w.lower() for w in _WORD.findall(text)]
+    covered, i = 0, 0
+    while i < len(words):
+        run = _match_len(words, i, ref, index)
+        if run >= min_run:
+            covered += run
+            i += run
+        else:
+            i += 1
+    return covered
+
+
+def _truncate_copied_runs(text: str, reference: str, budget: QuoteBudget | None) -> str:
     ref = _ref_words(reference)
     if not ref:
         return text
@@ -82,12 +99,17 @@ def _truncate_copied_runs(text: str, reference: str) -> str:
     out, pos, i = [], 0, 0
     while i < len(words):
         run = _match_len(words, i, ref, index)
-        if run > MAX_COPY_RUN:
-            out.append(text[pos:spans[i + SNIPPET_WORDS - 1][1]] + ELLIPSIS)
-            pos = spans[i + run - 1][1]
-            i += run
-        else:
+        if run < MIN_COPY_RUN:
             i += 1
+            continue
+        keep = SNIPPET_WORDS if run > MAX_COPY_RUN else run
+        if budget is not None:
+            keep = budget.take(keep)
+        if keep < run:
+            out.append(text[pos:spans[i + keep - 1][1]] if keep else text[pos:spans[i][0]])
+            out.append(ELLIPSIS)
+            pos = spans[i + run - 1][1]
+        i += run
     out.append(text[pos:])
     return "".join(out)
 
@@ -108,7 +130,7 @@ def _limit_quoted_spans(text: str, budget: QuoteBudget) -> str:
 
 def guard_text(text: str, reference: str = "", budget: QuoteBudget | None = None) -> str:
     """Apply both rules to one free-text field of a note."""
-    text = _truncate_copied_runs(text, reference)
+    text = _truncate_copied_runs(text, reference, budget)
     if budget is not None:
         text = _limit_quoted_spans(text, budget)
     return text
