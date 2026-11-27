@@ -18,7 +18,9 @@ from daily_pulse.notes import _write_atomic
 DIAMOND_MIN_RATING = 9
 DIAMOND_MAX_AGE = timedelta(hours=48)  # strictly younger than this
 
-_BOLD_RATING = re.compile(r"^\*\*(\d+)/10\*\* — (.*)$", re.M)
+# Anchored on the "## Rating" heading: free text (summary, title) is one line, so it can never
+# start a line of its own and forge this section.
+_REASON = re.compile(r"^## Rating\n\n\*\*\d+/10\*\* — (.*)$", re.M)
 
 
 @dataclass
@@ -41,7 +43,7 @@ class Digest:
     html: str
 
 
-def _parse_time(text: str) -> datetime | None:
+def parse_time(text: str) -> datetime | None:
     if not isinstance(text, str) or not text.strip():
         return None
     try:
@@ -65,8 +67,8 @@ def _parse_note(path: Path) -> Entry | None:
             front[key] = json.loads(raw)
         except ValueError:
             front[key] = raw
-    rated = _BOLD_RATING.search(body)
-    if rated is None:
+    rating, reason = front.get("rating"), _REASON.search(body)
+    if isinstance(rating, bool) or not isinstance(rating, int) or reason is None:
         return None
     verdict = front.get("verdict")
     if verdict is None:
@@ -78,9 +80,9 @@ def _parse_note(path: Path) -> Entry | None:
         title=str(front.get("title", path.stem)),
         url=str(front.get("url", "")),
         author=str(front.get("author", front.get("channel", ""))),
-        published=_parse_time(front.get("published", "")),
-        rating=int(rated.group(1)),
-        reason=rated.group(2),
+        published=parse_time(front.get("published", "")),
+        rating=rating,
+        reason=reason.group(1),
         verdict=verdict,
         tags=[str(t) for t in front.get("tags", [])],
     )
@@ -140,14 +142,20 @@ def _status_lines(entries: list[Entry], sources: dict | None) -> list[tuple[str,
 
 def _safe_url(url: str) -> str:
     """The URL if it is an absolute http(s) link, else "" (never link javascript: and the like)."""
-    parts = urlsplit(url.strip())
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:  # e.g. "http://[::1": an unusable URL costs its link, not the digest
+        return ""
     return url.strip() if parts.scheme in ("http", "https") and parts.netloc else ""
 
 
 def _join(base_url: str, *parts: str) -> str:
     """An absolute URL under base_url, or "" when no usable base is configured."""
     base = _safe_url(base_url)
-    return base.rstrip("/") + "/" + "/".join(parts) if base else ""
+    if not base:
+        return ""
+    split = urlsplit(base)  # drop any query/fragment: they cannot prefix a path
+    return f"{split.scheme}://{split.netloc}{split.path.rstrip('/')}/" + "/".join(parts)
 
 
 def _note_url(base_url: str, date: str, entry: Entry) -> str:
@@ -264,8 +272,11 @@ def _render_html(date, entries, diamonds, statuses, base_url) -> str:
 
 def build_digest(notes_dir: Path, date: str, sources: dict | None = None,
                  base_url: str = "", now: datetime | None = None) -> Digest:
-    """Rank the day's notes and render them. `sources` is RunResult.sources (name -> {"status": ...});
-    `now` defaults to the end of `date`, so the same inputs always give the same digest."""
+    """Rank the day's notes and render them. `sources` is RunResult.sources (name -> {"status": ...}).
+    `now` is the moment item ages are measured from. Pass the run's own timestamp (the CLI uses
+    `generated_at` from the run result); the default, the end of `date` UTC, is only a fallback and
+    can make items look up to 24h older than they were. Never the wall clock, so rebuilding a
+    day gives the same digest."""
     entries = _load(notes_dir, date)
     now = now or _default_now(date)
     diamonds = [e for e in entries if is_diamond(e, now)]

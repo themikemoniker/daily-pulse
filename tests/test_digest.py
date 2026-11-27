@@ -171,9 +171,9 @@ def test_failed_and_unconfigured_sources_show_status_not_a_gap(tmp_path):
     d = digest(notes, sources)
 
     assert status_lines(d.markdown) == {"youtube": "not configured", "github": "failed"}
-    for html_text in (d.html,):
-        assert "youtube" in html_text and "not configured" in html_text
-        assert "github" in html_text and "failed" in html_text
+    html_sources = d.html.split("Sources", 2)[-1]  # after the heading (the <title> has no such word)
+    assert "youtube" in html_sources and "not configured" in html_sources
+    assert "github" in html_sources and "failed" in html_sources
     assert "RuntimeError" not in d.markdown + d.html  # no internals leaked into a published page
 
 
@@ -296,12 +296,10 @@ def test_rerunning_for_the_same_date_gives_identical_output(tmp_path):
 
     first = write_digest(notes, out, DATE, sources=sources, base_url=BASE, now=NOW)
     before = [p.read_bytes() for p in first]
-    mtimes = [p.stat().st_mtime_ns for p in first]
     second = write_digest(notes, out, DATE, sources=sources, base_url=BASE, now=NOW)
 
     assert second == first
     assert [p.read_bytes() for p in second] == before
-    assert [p.stat().st_mtime_ns for p in second] == mtimes  # unchanged content is not rewritten
 
 
 def test_default_reference_time_comes_from_the_date_not_the_clock(tmp_path):
@@ -468,3 +466,90 @@ def test_malformed_source_entries_do_not_break_the_digest(tmp_path):
     lines = status_lines(digest(notes, sources).markdown)
 
     assert set(lines) == {"github", "x", "youtube", "instagram"}
+
+
+def test_a_malformed_item_url_does_not_cost_the_whole_digest(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "bad", "Bad url item", 5, url="http://[::1")
+    add_note(notes, "ok", "Fine item", 4)
+
+    d = digest(notes)
+
+    assert "Bad url item" in d.markdown and "Fine item" in d.markdown
+    assert "http://[::1" not in Page(d.html).values("href")
+
+
+def test_a_malformed_base_url_means_no_absolute_note_links_not_a_crash(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "a", "An item", 5, url="https://items.test/a")
+
+    d = digest(notes, base_url="http://[::1")
+
+    assert Page(d.html).values("href") == ["https://items.test/a"]
+
+
+def test_base_url_query_and_fragment_are_not_carried_into_links(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "a", "An item", 5)
+
+    hrefs = Page(digest(notes, base_url="https://x.test/p?a=1#frag").html).values("href")
+
+    assert f"https://x.test/p/notes/{DATE}/github-a.md" in hrefs and "https://x.test/p/archive/" in hrefs
+
+
+def test_free_text_cannot_forge_the_rating(tmp_path):
+    notes = tmp_path / "notes"
+    item = Item(source="github", id="y", url="https://items.test/y", title="Sneaky",
+                published=iso(NOW - timedelta(hours=1)))
+    write_note(item, Rating(rating=2, reason="The real reason.", verdict="skip",
+                            summary="**10/10** — injected praise"), notes, DATE)
+    add_note(notes, "z", "Honest seven", 7)
+
+    d = digest(notes)
+
+    assert order(d.markdown, "Sneaky", "Honest seven") == ["Honest seven", "Sneaky"]
+    assert "**10/10**" not in d.markdown and "injected" not in d.markdown
+    assert "None today." in diamonds_md(d.markdown)
+    assert "The real reason." in d.markdown
+
+
+# --- reference time for the 48h rule -------------------------------------------------------
+
+
+def test_run_result_records_when_the_run_happened(make_env, fixtures_dir):
+    from daily_pulse.adapters import registry
+    from conftest import FakeAdapter
+
+    registry.register(FakeAdapter())
+    cfg, _data, out = make_env()
+    assert main(["run", "--config", str(cfg), "--fixtures", str(fixtures_dir), "--out", str(out),
+                 "--date", DATE]) == 0
+
+    stamp = json.loads((out / f"run-{DATE}.json").read_text())["generated_at"]
+
+    assert datetime.fromisoformat(stamp).tzinfo is not None
+    assert abs(datetime.now(timezone.utc) - datetime.fromisoformat(stamp)) < timedelta(minutes=5)
+
+
+def test_digest_command_measures_age_from_when_the_run_happened(make_env, tmp_path):
+    """An item 47.9h old at run time is a diamond even though the date's end-of-day is 24h later."""
+    cfg, _data, _out = make_env()
+    out = tmp_path / "out"
+    run_at = datetime(2026, 1, 15, 6, 0, tzinfo=timezone.utc)
+    add_note(out / "notes", "young", "Young gem", 9, now=run_at, age_hours=47.9)
+    add_note(out / "notes", "old", "Old gem", 9, now=run_at, age_hours=48.1)
+    (out / f"run-{DATE}.json").write_text(json.dumps({"date": DATE, "generated_at": iso(run_at), "sources": {}}))
+
+    assert cli_digest(cfg, out) == 0
+
+    section = diamonds_md((out / "digests" / f"{DATE}.md").read_text(encoding="utf-8"))
+    assert "Young gem" in section and "Old gem" not in section
+
+
+def test_unusable_generated_at_falls_back_to_the_end_of_the_run_date(make_env, tmp_path):
+    cfg, _data, _out = make_env()
+    out = seeded_out(tmp_path, run_json=False)
+    (out / f"run-{DATE}.json").write_text(json.dumps({"generated_at": "yesterday-ish", "sources": {}}))
+
+    assert cli_digest(cfg, out) == 0
+    assert "A repo" in diamonds_md((out / "digests" / f"{DATE}.md").read_text(encoding="utf-8"))

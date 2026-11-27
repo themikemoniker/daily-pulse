@@ -13,7 +13,7 @@ from datetime import date as _date
 from pathlib import Path
 
 from daily_pulse.config import DEFAULT_CONFIG, ConfigError, load_config
-from daily_pulse.digest import write_digest
+from daily_pulse.digest import parse_time, write_digest
 from daily_pulse.lock import LockError, LockHeld, RunLock
 from daily_pulse.runner import run_pipeline
 from daily_pulse.state import StateError, atomic_write_json
@@ -73,11 +73,14 @@ def main(argv: list[str] | None = None) -> int:
 def _digest(args, config, date: str) -> int:
     """Rebuild the day's digest from notes on disk plus the run result for source statuses."""
     sources: dict = {}
+    now = None  # falls back to the end of `date`
     result_path = args.out / f"run-{date}.json"
     try:
-        sources = json.loads(result_path.read_text(encoding="utf-8")).get("sources", {})
+        recorded = json.loads(result_path.read_text(encoding="utf-8"))
+        sources = recorded.get("sources", {})
         if not isinstance(sources, dict):
             raise ValueError("'sources' is not an object")
+        now = parse_time(recorded.get("generated_at"))
     except FileNotFoundError:
         pass  # no run recorded: statuses are derived from the notes alone
     except (OSError, ValueError, AttributeError) as exc:
@@ -85,8 +88,8 @@ def _digest(args, config, date: str) -> int:
         sources = {}
     base_url = config.base_url if args.base_url is None else args.base_url
     try:
-        write_digest(args.out / "notes", args.out / "digests", date, sources=sources, base_url=base_url)
-    except OSError as exc:
+        write_digest(args.out / "notes", args.out / "digests", date, sources=sources, base_url=base_url, now=now)
+    except Exception as exc:  # noqa: BLE001 - whatever went wrong, say so cleanly rather than a traceback
         print(f"daily-pulse: cannot write digest under {args.out / 'digests'}: {exc}", file=sys.stderr)
         return 1
     return 0

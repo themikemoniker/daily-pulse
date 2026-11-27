@@ -28,4 +28,6 @@ A daily trends digest. Under construction; see the spec issue.
 `<date>.html` from the notes in `<dir>/notes/<date>/` and the source statuses in `<dir>/run-<date>.json`.
 Items are ranked by rating (newest first on ties); items rated 9+ and under 48 hours old are repeated in a
 "Diamonds in the rough" section at the top. The HTML is email-ready (inline styles, table layout, no external
-CSS/JS); links are absolute, built from `site.base_url` in the config. Rebuilding a date gives identical files.
+CSS/JS); links are absolute, built from `site.base_url` in the config. Item ages are measured from the run's
+`generated_at` (recorded in `run-<date>.json`; falls back to the end of the date, UTC), so rebuilding a date gives
+identical files.
