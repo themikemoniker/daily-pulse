@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 
-def _atomic_write_json(path: Path, payload: dict) -> None:
+def atomic_write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
@@ -40,29 +40,27 @@ class StateStore:
         self._persist = persist
         self._processed_path = Path(data_dir) / "state" / "processed.json"
         self._processed: dict[str, list[str]] = _read_json(self._processed_path)
+        self._seen: dict[str, set[str]] = {k: set(v) for k, v in self._processed.items()}
 
     def is_first_run(self, source: str) -> bool:
         return source not in self._processed
 
     def is_processed(self, source: str, item_id: str) -> bool:
-        return item_id in self._processed.get(source, [])
+        return item_id in self._seen.get(source, ())
 
-    def begin_source(self, source: str) -> None:
-        """Mark a source as seen so later runs are not 'first runs'."""
-        if source not in self._processed:
-            self._processed[source] = []
-            self._flush()
-
-    def mark_processed(self, source: str, item_id: str) -> None:
-        """Record one item and flush to disk immediately."""
+    def mark_processed(self, source: str, *item_ids: str) -> None:
+        """Record items (one flush for the whole call, so pass one id per item as it completes)."""
         ids = self._processed.setdefault(source, [])
-        if item_id not in ids:
-            ids.append(item_id)
+        seen = self._seen.setdefault(source, set())
+        for item_id in item_ids:
+            if item_id not in seen:
+                seen.add(item_id)
+                ids.append(item_id)
         self._flush()
 
     def _flush(self) -> None:
         if self._persist:
-            _atomic_write_json(self._processed_path, self._processed)
+            atomic_write_json(self._processed_path, self._processed)
 
 
 class FailureCounters:
@@ -92,4 +90,4 @@ class FailureCounters:
 
     def _flush(self) -> None:
         if self._persist:
-            _atomic_write_json(self._path, self._counters)
+            atomic_write_json(self._path, self._counters)

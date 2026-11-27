@@ -255,4 +255,68 @@ def test_corrupt_state_fails_loudly_without_reprocessing_or_overwriting(
     assert code == 1
     assert "processed.json" in err and "Traceback" not in err
     assert bad.read_text() == "{not json"  # left for the operator to inspect
-    assert not out.exists()
+    assert not list(out.glob("run-*.json"))
+
+
+def test_adapter_whose_status_raises_is_isolated_like_any_other_failure(make_env, fixtures_dir):
+    class BadStatus(FakeAdapter):
+        def status(self, ctx):
+            raise RuntimeError("status exploded")
+
+    registry.register(BadStatus("bad"))
+    registry.register(FakeAdapter())
+    (fixtures_dir / "bad").mkdir()
+    cfg, data, out = make_env(sources=("bad", "fake"))
+    assert run(cfg, out, fixtures_dir) == 0
+    srcs = result(out)["sources"]
+    assert srcs["bad"]["status"] == "failed" and "status exploded" in srcs["bad"]["error"]
+    assert srcs["bad"]["consecutive_failures"] == 1
+    assert srcs["fake"]["status"] == "ok"
+
+
+def test_malformed_item_from_adapter_fails_that_module_only(make_env, fixtures_dir):
+    class Malformed(FakeAdapter):
+        def list_new(self, ctx):
+            return [object()]
+
+    registry.register(Malformed("bad"))
+    registry.register(FakeAdapter())
+    (fixtures_dir / "bad").mkdir()
+    cfg, data, out = make_env(sources=("bad", "fake"))
+    assert run(cfg, out, fixtures_dir) == 0
+    assert result(out)["sources"]["bad"]["status"] == "failed"
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+
+
+def test_unwritable_out_fails_before_any_item_is_consumed(make_env, fixtures_dir, tmp_path, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, so out/ cannot be created under it")
+    assert run(cfg, blocker / "out", fixtures_dir) == 1
+    assert "cannot write" in capsys.readouterr().err
+    # nothing was consumed: a rerun with a good --out still finds both items
+    assert run(cfg, out, fixtures_dir) == 0
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+
+
+def test_same_date_rerun_keeps_the_earlier_results(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    run(cfg, out, fixtures_dir)
+    run(cfg, out, fixtures_dir)
+    assert result(out)["sources"]["fake"]["items"] == []  # latest run
+    earlier = json.loads((out / "run-2026-01-15.1.json").read_text())
+    assert [i["id"] for i in earlier["sources"]["fake"]["items"]] == ["a1", "a2"]
+
+
+def test_duplicate_ids_in_one_listing_are_processed_once(make_env, fixtures_dir):
+    class Dupes(FakeAdapter):
+        def list_new(self, ctx):
+            items = super().list_new(ctx)
+            return items + items
+
+    registry.register(Dupes())
+    cfg, data, out = make_env()
+    run(cfg, out, fixtures_dir)
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["a1", "a2"]
