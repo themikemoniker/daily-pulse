@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import tomllib
@@ -79,7 +80,11 @@ def _write_result(out: Path, date: str, payload: dict) -> None:
             n = 1
             while (out / f"run-{date}.{n}.json").exists():
                 n += 1
-            os.link(target, out / f"run-{date}.{n}.json")  # keep the old content aside
+            aside = out / f"run-{date}.{n}.json"
+            try:
+                os.link(target, aside)  # keep the old content aside
+            except OSError:  # filesystem without hard links
+                shutil.copy2(target, aside)
         os.replace(staged, target)  # atomic: the canonical file is never missing
     except BaseException:
         staged.unlink(missing_ok=True)
@@ -114,6 +119,10 @@ def _run(args, config, date: str) -> int:
     except Exception as exc:  # noqa: BLE001 - whatever went wrong, don't lose the result
         # State is already committed, so don't lose what this run found: keep it locally.
         saved = log_dir / f"run-{date}.unsaved.json"
+        n = 1
+        while saved.exists():  # never overwrite an earlier unsaved result
+            saved = log_dir / f"run-{date}.unsaved.{n}.json"
+            n += 1
         try:
             atomic_write_json(saved, payload, default=str)
             where = f"this run's result was saved to {saved}"

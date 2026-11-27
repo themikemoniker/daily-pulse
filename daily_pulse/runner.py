@@ -1,7 +1,6 @@
 """Runs each enabled source adapter in isolation and collects a RunResult."""
 from __future__ import annotations
 
-import json
 import logging
 import traceback
 from dataclasses import dataclass, field
@@ -10,7 +9,7 @@ from pathlib import Path
 from daily_pulse.adapters import registry
 from daily_pulse.adapters.base import AdapterContext
 from daily_pulse.config import Config
-from daily_pulse.state import FailureCounters, StateError, StateStore
+from daily_pulse.state import FailureCounters, StateError, StateStore, serialize_json
 
 log = logging.getLogger("daily_pulse")
 
@@ -53,7 +52,7 @@ def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list) -> Excep
             item = adapter.fetch_details(candidate, ctx)
             # Prove the item can be reported *before* it is marked processed, so a bad
             # item is retried next run instead of being consumed and lost.
-            json.dumps(item.to_dict())
+            serialize_json(item.to_dict())
         except Exception as exc:  # noqa: BLE001
             log.error("%s: item %s failed\n%s", name, candidate.id, traceback.format_exc())
             error = error or exc

@@ -7,12 +7,17 @@ import tempfile
 from pathlib import Path
 
 
+def serialize_json(payload: dict, default=None) -> str:
+    """The one serialization used by every state/result writer and by the pre-commit item check."""
+    return json.dumps(payload, indent=2, sort_keys=True, default=default)
+
+
 def atomic_write_json(path: Path, payload: dict, default=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True, default=default)
+            fh.write(serialize_json(payload, default))
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
@@ -27,8 +32,10 @@ class StateError(Exception):
 
 
 def _valid_counter(entry: dict) -> bool:
-    return all(isinstance(entry.get(k, 0), int) and not isinstance(entry.get(k, 0), bool)
-               for k in ("consecutive", "total"))
+    return all(
+        isinstance(entry.get(k, 0), int) and not isinstance(entry.get(k, 0), bool) and entry.get(k, 0) >= 0
+        for k in ("consecutive", "total")
+    )
 
 
 def _valid_ids(entry: list) -> bool:
@@ -102,6 +109,9 @@ class FailureCounters:
         self._persist = persist
         self._path = Path(data_dir) / "state" / "failures.json"
         self._counters: dict[str, dict] = _read_json(self._path, dict)
+        for entry in self._counters.values():  # partial entries get defaults
+            entry.setdefault("consecutive", 0)
+            entry.setdefault("total", 0)
 
     def consecutive(self, module: str) -> int:
         return self._counters.get(module, {}).get("consecutive", 0)

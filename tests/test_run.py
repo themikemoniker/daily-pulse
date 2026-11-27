@@ -539,3 +539,57 @@ def test_unusable_log_location_is_a_clean_error(make_env, fixtures_dir, capsys):
     err = capsys.readouterr().err
     assert "logs" in err and "Traceback" not in err
     assert not (data / "state" / "processed.json").exists()
+
+
+# --- third round ---------------------------------------------------------------------------
+
+def test_partial_failure_counter_entries_load_and_update(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    (data / "state" / "failures.json").write_text('{"fake": {"total": 3}}')
+    assert run(cfg, out, fixtures_dir) == 0  # success path used to KeyError
+    registry._ADAPTERS["fake"] = FakeAdapter(fail_list=True)
+    assert run(cfg, out, fixtures_dir) == 0  # failure path too
+    assert result(out)["sources"]["fake"]["consecutive_failures"] == 1
+    saved = json.loads((data / "state" / "failures.json").read_text())["fake"]
+    assert saved["total"] == 4
+
+
+def test_same_date_rerun_still_writes_when_hard_links_are_unsupported(
+    make_env, fixtures_dir, monkeypatch
+):
+    import os
+
+    def no_links(*a, **k):
+        raise OSError("hard links not supported")
+
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    run(cfg, out, fixtures_dir)
+    monkeypatch.setattr(os, "link", no_links)
+    assert run(cfg, out, fixtures_dir) == 0
+    earlier = json.loads((out / "run-2026-01-15.1.json").read_text())
+    assert len(earlier["sources"]["fake"]["items"]) == 2
+
+
+def test_item_with_mixed_type_keys_is_rejected_before_it_is_consumed(make_env, fixtures_dir):
+    class MixedKeys(FakeAdapter):
+        def fetch_details(self, item, ctx):
+            item = super().fetch_details(item, ctx)
+            if item.id == "a1":
+                item.metrics = {1: "x", "views": 5}  # json.dumps ok, sort_keys=True fails
+            return item
+
+    registry.register(MixedKeys())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+    assert result(out)["sources"]["fake"]["status"] == "failed"
+    assert json.loads((data / "state" / "processed.json").read_text())["fake"] == ["a2"]
+
+
+def test_enabled_must_be_a_bool(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(sources=(), extra='[sources.fake]\nenabled = "yes"\n')
+    assert run(cfg, out, fixtures_dir) == 1
+    assert "enabled" in capsys.readouterr().err

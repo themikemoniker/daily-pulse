@@ -48,6 +48,8 @@ def load_config(path: Path) -> Config:
     for name, source in sources.items():
         if not isinstance(source, dict):
             raise ConfigError(f"[sources.{name}] must be a table")
+        if not isinstance(source.get("enabled", True), bool):
+            raise ConfigError(f"sources.{name}.enabled must be true or false")
     return Config(
         data_dir=path.parent / data_dir,
         first_run_cap=_int(run, "first_run_cap", 10, 0, "run.first_run_cap"),
