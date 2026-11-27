@@ -25,6 +25,25 @@ yet, so they do not reach the digest or the site. **X** is deferred (see [Deferr
    `IG_CLI_CMD` (the Instagram command), `DAILY_PULSE_CLAUDE` (overrides `claude_cmd`), `DAILY_PULSE_YTDLP`.
 4. `claude` must be on the PATH of whatever runs the pipeline; it uses your Claude subscription, no API key.
 
+## Watching creators
+
+Add a creator with one command; the next run picks them up. The list lives in `config/watchlist.toml` (public handles only, committed like the rest of the config) and is merged into the source settings on every run.
+
+```
+daily-pulse watch add https://www.youtube.com/@aiDotEngineer   # a YouTube channel
+daily-pulse watch add https://github.com/karpathy              # a GitHub account
+daily-pulse watch add can1357/oh-my-pi                         # a GitHub repo's releases
+daily-pulse watch add swyx --source x                          # a bare handle needs --source
+daily-pulse watch list
+daily-pulse watch remove swyx --source x
+```
+
+- The platform is detected from a profile URL (YouTube `@handle`, `/channel/UC...`, `/c/`, `/user/`; GitHub; X; Instagram). A video or playlist link, a site page such as `github.com/orgs/...`, or a bare name without `--source` is refused with a hint. `watch add` makes no network call, so it does not check that the account exists.
+- Adding is idempotent and case-insensitive. The file is regenerated on every change, so hand-written comments in it are not kept.
+- **YouTube channels** list their newest `channel_limit` uploads per run (default 5, `[sources.youtube] channel_limit`), shared round-robin with the playlist so the first-run cap and call cap spread across creators. A channel that cannot be listed is logged and skipped. The quality gate (minimum rating, duration, blocklists) applies as before.
+- **GitHub** accounts and repos are merged into `watch_accounts` and `watch_repos`.
+- **X and Instagram** handles are stored but stay inert: X is paid and stays off until you enable it, Instagram needs a configured CLI. Adding a handle never turns a source on or spends anything.
+
 ## Privacy rules
 
 - Transcripts, captions, processed-ID state, triage logs and run logs stay under `data/` (gitignored, never
