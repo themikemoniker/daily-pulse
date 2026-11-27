@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from daily_pulse.models import VERDICTS, Beat, Item, Rating
+from daily_pulse.quoteguard import QuoteBudget, guard_fields
 
 log = logging.getLogger("daily_pulse")
 
@@ -87,6 +88,7 @@ def parse_reply(text: str, item: Item) -> Rating:
         tags=_str_list(data, "tags"),
         summary=_str(data, "summary", required=not is_video),
         takeaways=_str_list(data, "takeaways"),
+        quotes=_str_list(data, "quotes") if "quotes" in data else [],
         beats=parsed_beats,
         diamond=diamond,
         diamond_reason=diamond_reason,
@@ -95,6 +97,29 @@ def parse_reply(text: str, item: Item) -> Rating:
 
 class CallFailed(Exception):
     """The claude process failed, timed out or could not be started."""
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def guard_rating(rating: Rating, reference: str) -> Rating:
+    """Keep source text out of a rating: quotes are capped and share one budget with quoted spans
+    and lifted runs in the free text, and no run of more than 40 words matches `reference`."""
+    budget = QuoteBudget()
+    quotes = [q for q in (budget.fit(_one_line(q)) for q in rating.quotes) if q]
+    rating.quotes = guard_fields(quotes, reference)  # adjacent quotes must not add up to a long copy
+
+    def guarded(fields: list[str]) -> list[str]:
+        return guard_fields(fields, reference, budget)
+
+    rating.summary, rating.reason, rating.diamond_reason = guarded(
+        [rating.summary, rating.reason, rating.diamond_reason])
+    rating.takeaways = guarded(rating.takeaways)
+    for beat, text in zip(rating.beats, guarded([b.text for b in rating.beats])):
+        beat.text = text
+    rating.tags = guarded(rating.tags)
+    return rating
 
 
 @dataclass
@@ -142,7 +167,8 @@ class Summarizer:
                 log.warning("%s: left unrated, call cap of %d reached", label, self.max_calls)
                 return None
             try:
-                return parse_reply(self._call(prompt), item)
+                rating = parse_reply(self._call(prompt), item)
+                return guard_rating(rating, "\n".join(p for p in (transcript, item.text) if p))
             except (BadReply, CallFailed) as exc:
                 log.warning("%s: attempt %d/%d failed: %s", label, attempt, ATTEMPTS, exc)
         log.warning("%s: left unrated", label)

@@ -223,3 +223,55 @@ def test_a_hung_process_times_out_as_unrated(tmp_path):
     script.chmod(0o755)
     s = Summarizer(claude_cmd=str(script), timeout=0.2, max_calls=2)
     assert s.rate(repo_item()) is None
+
+
+TRANSCRIPT = " ".join(f"word{i}" for i in range(200))
+
+
+def _all_text(r):
+    return "\n".join([r.summary, r.reason, r.diamond_reason, *r.takeaways, *r.tags, *r.quotes,
+                      *(b.text for b in r.beats)])
+
+
+def test_transcript_is_sent_to_claude_but_not_returned(fake_claude):
+    from daily_pulse.quoteguard import MAX_COPY_RUN, longest_copied_run
+
+    lifted = " ".join(f"word{i}" for i in range(10, 110))  # 100 words copied verbatim
+    claude = fake_claude(good(
+        summary=lifted, takeaways=[lifted], beats=[{"timestamp": "00:10", "text": lifted}],
+        reason=lifted, quotes=[" ".join(f"word{i}" for i in range(150, 190))],
+    ))
+    item = repo_item(source="youtube", id="v1", title="Talk")
+    rating = Summarizer(claude_cmd=str(claude.path)).rate(item, transcript=TRANSCRIPT)
+    assert "word199" in claude.stdin(0)  # the model sees it
+    assert longest_copied_run(_all_text(rating), TRANSCRIPT) <= MAX_COPY_RUN
+    assert longest_copied_run(rating.summary, TRANSCRIPT) < 25
+    for quote in rating.quotes:
+        assert len(quote.split()) <= 26  # 25 words plus the ellipsis marker
+
+
+def test_quoted_words_across_the_result_stay_under_50(fake_claude):
+    from daily_pulse.quoteguard import word_count
+
+    q = " ".join(f"word{i}" for i in range(0, 20))
+    q2 = " ".join(f"word{i}" for i in range(50, 70))
+    q3 = " ".join(f"word{i}" for i in range(100, 120))
+    claude = fake_claude(good(quotes=[q, q2, q3]))
+    rating = Summarizer(claude_cmd=str(claude.path)).rate(repo_item(), transcript=TRANSCRIPT)
+    assert sum(word_count(q) for q in rating.quotes) < 50
+
+
+def test_own_words_pass_through_unchanged(fake_claude):
+    claude = fake_claude(good(quotes=["a short quote"]))
+    rating = Summarizer(claude_cmd=str(claude.path)).rate(repo_item(), transcript=TRANSCRIPT)
+    assert rating.summary == "A tool that wraps agent runs in a maker-checker loop."
+    assert rating.quotes == ["a short quote"]
+
+
+def test_item_excerpt_counts_as_source_text(fake_claude):
+    from daily_pulse.quoteguard import MAX_COPY_RUN, longest_copied_run
+
+    excerpt = " ".join(f"tok{i}" for i in range(120))
+    claude = fake_claude(good(summary=excerpt))
+    rating = Summarizer(claude_cmd=str(claude.path)).rate(repo_item(text=excerpt))
+    assert longest_copied_run(rating.summary, excerpt) <= MAX_COPY_RUN
