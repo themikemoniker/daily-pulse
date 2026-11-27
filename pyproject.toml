@@ -1,0 +1,22 @@
+[project]
+name = "daily-pulse"
+version = "0.1.0"
+description = "Daily trends digest published as a static site"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+daily-pulse = "daily_pulse.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["daily_pulse*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
