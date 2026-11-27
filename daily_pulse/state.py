@@ -22,11 +22,17 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         raise
 
 
+class StateError(Exception):
+    """State on disk is unreadable. Never guess: resetting would reprocess everything."""
+
+
 def _read_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
     except FileNotFoundError:
         return {}
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise StateError(f"cannot read state file {path}: {exc}. Fix or remove it and re-run.") from exc
 
 
 class StateStore:

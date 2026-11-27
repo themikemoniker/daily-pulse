@@ -220,3 +220,39 @@ def test_shipped_config_runs_and_has_the_spec_seed_values(tmp_path, fixtures_dir
     assert {"karpathy", "can1357", "langchain-ai"} <= set(cfg.sources["github"]["watch_accounts"])
     assert "Simon Willison" in cfg.sources["x"]["handles"]
     assert cfg.sources["youtube"]["playlist_url"] == ""
+
+
+def test_bad_date_is_rejected_before_anything_is_written(make_env, fixtures_dir, capsys):
+    import pytest
+
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--config", str(cfg), "--fixtures", str(fixtures_dir), "--out", str(out),
+              "--date", "notadate"])
+    assert exc.value.code == 2
+    assert "YYYY-MM-DD" in capsys.readouterr().err
+    assert not data.exists() and not out.exists()
+
+
+def test_missing_config_is_a_clear_error_not_a_traceback(tmp_path, fixtures_dir, capsys):
+    code = main(["run", "--config", str(tmp_path / "nope.toml"), "--out", str(tmp_path / "o")])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "nope.toml" in err and "Traceback" not in err
+
+
+def test_corrupt_state_fails_loudly_without_reprocessing_or_overwriting(
+    make_env, fixtures_dir, capsys
+):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    bad = data / "state" / "processed.json"
+    bad.write_text("{not json")
+    code = run(cfg, out, fixtures_dir)
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "processed.json" in err and "Traceback" not in err
+    assert bad.read_text() == "{not json"  # left for the operator to inspect
+    assert not out.exists()
