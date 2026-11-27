@@ -34,7 +34,9 @@ DESCRIPTION_CHARS = 300  # an untrusted description is cut to this in the prompt
 def age_days(iso):
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return max(0.1, (datetime.now(timezone.utc) - dt).days
+        # A repo younger than a day counts as one day (the script floored it at 0.1 day), so the
+        # rater, the pool and the digest's diamond rule all read the same, never-inflated velocity.
+        return max(1.0, (datetime.now(timezone.utc) - dt).days
                    + (datetime.now(timezone.utc) - dt).seconds / 86400)
     except (ValueError, TypeError, AttributeError):
         return 1.0

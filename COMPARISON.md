@@ -48,8 +48,9 @@ diamond rule. A one-line "velocity is a signal, never the score" is added to the
   every run), so a day with nothing new makes no call, and a repo rated below `min_relevance` (default 4) is a
   logged drop, not a silent one.
 - GitHub diamond: relevance 7+ and 50+ stars a day, as an addition to the repo's rating 9+ and under 48 hours.
-  GitHub notes now carry `star_velocity`. The repo's velocity counts a repo younger than a day as one day (the
-  script floors the age at 0.1 day), so the threshold is harder to reach for brand-new repos on purpose.
+  GitHub notes now carry `star_velocity`. One velocity definition is used everywhere (the
+  rater's "N/day", the rating pool and the note's `star_velocity`): a repo younger than a day counts as one day.
+  The script floored the age at 0.1 day, which could inflate a three-hour-old repo tenfold.
 - Prompt wording: say so when a video is too basic or unverified hype, never invent numbers or timestamps,
   say what would confirm a diamond, velocity is never the score.
 - Instagram: caption-first-line title, a clear error when the configured command is missing, a `limit` that

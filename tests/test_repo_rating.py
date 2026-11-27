@@ -56,7 +56,7 @@ def test_topic_score_counts_keywords_and_stops_at_3():
 def test_velocity_is_stars_per_day_and_never_inflated_for_a_brand_new_repo():
     assert velocity_of(repo("a/b", stars=300, days=3)) == pytest.approx(100, abs=2)
     assert velocity_of({"stargazers_count": 5, "created_at": "nonsense"}) == 5.0  # unreadable date: one day
-    assert age_days(datetime.now(timezone.utc).isoformat()) == 0.1  # a floor, so no division by zero
+    assert age_days(datetime.now(timezone.utc).isoformat()) == 1.0  # a one-day floor, never inflated
 
 
 def test_the_rating_line_carries_stars_velocity_topics_and_a_cut_description():
