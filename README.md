@@ -50,6 +50,15 @@ identical files.
 - **Rate limits**: `X-RateLimit-Remaining` is read on every response. A 403/429 rate-limit response waits out a short `Retry-After`/reset (at most 30 s) once; otherwise, or when the budget hits zero, the adapter logs a warning, stops calling the API and returns what it already has (`adapter.last_run["degraded"]`). It never raises for a rate limit.
 - Tests use recorded responses in `tests/fixtures/github/responses.json` (keyed by API path) via `--fixtures`, or an injected transport. Unauthenticated limits are 60 requests/hour, so a long watch list may degrade without a token.
 
+## Static site
+
+`daily-pulse site --out <dir> [--date YYYY-MM-DD] [--site DIR]` builds `<dir>/site/` (default) in plain
+HTML and one shared `style.css` (light/dark via `prefers-color-scheme`, no JavaScript, no external assets):
+`index.html` (the day's ranked digest with a diamond callout), `archive/index.html`, `days/<date>.html`
+and `notes/<date>/<note>.html`. It copies `notes/*.md` and `digests/<date>.{md,html}` into the tree and
+reads nothing else, so `data/` can never reach the site. Pages are built from the site's own `notes/`, so
+earlier days stay in the archive; a rebuild is byte-identical.
+
 ## Deferred sources
 
 - **X: deferred** (`deferred: no usable read route`). Blockers: no X connector exists on the host, the X API free tier cannot read other accounts' posts, and raw scraping is forbidden. To unblock: provide a connector or a paid API tier that can read the accounts, then implement `list_new`/`fetch_details` in `daily_pulse/adapters/x.py`. The seed handles stay in `[sources.x].handles`.
