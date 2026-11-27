@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 
@@ -14,6 +15,14 @@ log = logging.getLogger("daily_pulse")
 
 API = "https://api.github.com"
 EXCERPT_CHARS = 400
+
+
+class RateLimited(Exception):
+    """The API is out of requests (or asked us to stop); the run degrades instead of failing."""
+
+
+MAX_WAIT_SECONDS = 30  # longest Retry-After / reset wait we will sit through
+MIN_REMAINING = 1  # stop issuing requests when this few remain
 
 
 class FixtureTransport:
@@ -39,27 +48,68 @@ def _excerpt(text) -> str:
 class GitHubAdapter(SourceAdapter):
     name = "github"
 
-    def __init__(self, transport=None):
+    def __init__(self, transport=None, sleep=time.sleep, clock=time.time):
         self._transport = transport  # callable(path, params) -> (status, headers, body)
+        self._sleep = sleep
+        self._clock = clock
+        self._exhausted = ""
+        self.last_run: dict = {"degraded": False, "reason": ""}
 
     def _now(self, ctx: AdapterContext) -> datetime:
         day = _date.fromisoformat(ctx.date) if ctx.date else datetime.now(timezone.utc).date()
         return datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
 
     def _get(self, ctx: AdapterContext, path: str, params: dict | None = None):
+        """One API call. Raises RateLimited when the budget is spent; waits out a short
+        Retry-After (once) first."""
         transport = self._transport or FixtureTransport(ctx.fixtures_dir)
-        status, _headers, body = transport(path, params or {})
-        return status, body
+        for attempt in (1, 2):
+            if self._exhausted:
+                raise RateLimited(self._exhausted)
+            status, headers, body = transport(path, params or {})
+            headers = {k.lower(): str(v) for k, v in headers.items()}
+            remaining = headers.get("x-ratelimit-remaining")
+            limited = status == 429 or (status == 403 and (
+                remaining == "0" or "rate limit" in str(body.get("message", "") if isinstance(body, dict) else "").lower()))
+            if limited:
+                wait = self._wait_seconds(headers)
+                if attempt == 1 and wait is not None and wait <= MAX_WAIT_SECONDS:
+                    log.warning("github: rate limited on %s, waiting %ss", path, wait)
+                    self._sleep(wait)
+                    continue
+                self._exhausted = f"rate limit hit on {path} (HTTP {status})"
+                raise RateLimited(self._exhausted)
+            if remaining is not None and remaining.isdigit() and int(remaining) < MIN_REMAINING:
+                self._exhausted = "rate limit exhausted (X-RateLimit-Remaining=0)"
+            return status, body
+        raise RateLimited(self._exhausted)
+
+    def _wait_seconds(self, headers: dict) -> float | None:
+        if headers.get("retry-after", "").isdigit():
+            return int(headers["retry-after"])
+        if headers.get("x-ratelimit-reset", "").isdigit():
+            return max(0, int(headers["x-ratelimit-reset"]) - self._clock())
+        return None
 
     def list_new(self, ctx: AdapterContext) -> list[Item]:
         cfg = ctx.config
         now = self._now(ctx)
+        self._exhausted = ""
+        self.last_run = {"degraded": False, "reason": ""}
         items: list[Item] = []
-        items += self._rising(ctx, now, int(cfg.get("rising_days", 7)))
-        for account in cfg.get("watch_accounts", []):
-            items += self._account(ctx, now, account)
-        for repo in cfg.get("watch_repos", []):
-            items += self._releases(ctx, now, repo)
+        stages = [lambda: self._rising(ctx, now, int(cfg.get("rising_days", 7)))]
+        stages += [lambda a=a: self._account(ctx, now, a) for a in cfg.get("watch_accounts", [])]
+        stages += [lambda r=r: self._releases(ctx, now, r) for r in cfg.get("watch_repos", [])]
+        for stage in stages:
+            try:
+                items += stage()
+            except RateLimited as exc:
+                log.warning("github: degraded, returning %d item(s) found so far: %s", len(items), exc)
+                self.last_run = {"degraded": True, "reason": str(exc)}
+                break
+        if self._exhausted and not self.last_run["degraded"]:
+            log.warning("github: %s; remaining requests skipped", self._exhausted)
+            self.last_run = {"degraded": True, "reason": self._exhausted}
         items.sort(key=lambda i: i.published, reverse=True)
         return items
 
