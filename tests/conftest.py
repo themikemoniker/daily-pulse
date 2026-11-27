@@ -1,5 +1,6 @@
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -64,3 +65,55 @@ def fixtures_dir(tmp_path):
     dest = tmp_path / "fixtures"
     shutil.copytree(FIXTURES, dest)
     return dest
+
+
+FAKE_CLAUDE = '''#!{python}
+import json, os, pathlib, sys
+d = pathlib.Path({dir!r})
+n = int((d / "count").read_text()) if (d / "count").exists() else 0
+(d / "count").write_text(str(n + 1))
+(d / f"argv-{{n}}.json").write_text(json.dumps(sys.argv[1:]))
+(d / f"cwd-{{n}}.txt").write_text(os.getcwd())
+(d / f"stdin-{{n}}.txt").write_bytes(sys.stdin.buffer.read())
+responses = json.loads((d / "responses.json").read_text())
+r = responses[min(n, len(responses) - 1)]
+if isinstance(r, dict) and "exit" in r:
+    sys.stderr.write("boom")
+    sys.exit(r["exit"])
+sys.stdout.buffer.write((r if isinstance(r, str) else json.dumps(r)).encode("utf-8"))
+'''
+
+
+class FakeClaude:
+    """A stand-in `claude` executable: replies from a canned list (the last one repeats) and
+    records every call's argv and stdin."""
+
+    def __init__(self, directory: Path, responses):
+        self.dir = directory
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / "responses.json").write_text(json.dumps(responses), encoding="utf-8")
+        self.path = self.dir / "fake-claude"
+        self.path.write_text(FAKE_CLAUDE.format(python=sys.executable, dir=str(self.dir)))
+        self.path.chmod(0o755)
+
+    @property
+    def calls(self) -> int:
+        count = self.dir / "count"
+        return int(count.read_text()) if count.exists() else 0
+
+    def stdin(self, n: int = 0) -> str:
+        return (self.dir / f"stdin-{n}.txt").read_text(encoding="utf-8")
+
+    def cwd(self, n: int = 0) -> str:
+        return (self.dir / f"cwd-{n}.txt").read_text()
+
+    def argv(self, n: int = 0) -> list[str]:
+        return json.loads((self.dir / f"argv-{n}.json").read_text())
+
+
+@pytest.fixture
+def fake_claude(tmp_path):
+    def _make(*responses):
+        return FakeClaude(tmp_path / "fake-claude-dir", list(responses))
+
+    return _make
