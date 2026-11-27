@@ -9,8 +9,11 @@ import html
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+DIAMOND_MIN_RATING = 9
+DIAMOND_MAX_AGE = timedelta(hours=48)  # strictly younger than this
 
 _BOLD_RATING = re.compile(r"^\*\*(\d+)/10\*\* — (.*)$", re.M)
 
@@ -88,11 +91,34 @@ def _load(notes_dir: Path, date: str) -> list[Entry]:
     return entries
 
 
+def _default_now(date: str) -> datetime:
+    """End of the run date (UTC). Derived from the date, never the wall clock, so rebuilding a
+    day's digest later gives the identical file."""
+    return datetime.fromisoformat(date).replace(tzinfo=timezone.utc) + timedelta(days=1)
+
+
+def is_diamond(entry: Entry, now: datetime) -> bool:
+    """High signal (rating 9+) and early (published less than 48 hours before `now`).
+    An item with no usable publish time cannot be shown to be early, so it is never one."""
+    if entry.published is None or entry.rating < DIAMOND_MIN_RATING:
+        return False
+    return now - entry.published < DIAMOND_MAX_AGE
+
+
 def build_digest(notes_dir: Path, date: str, sources: dict | None = None,
                  base_url: str = "", now: datetime | None = None) -> Digest:
     entries = _load(notes_dir, date)
-    md = [f"# Daily Pulse — {date}", ""]
+    now = now or _default_now(date)
+    diamonds = [e for e in entries if is_diamond(e, now)]
+    md = [f"# Daily Pulse — {date}", "", "## Diamonds in the rough", ""]
+    md += [f"- **{e.rating}/10** [{e.title}]({e.url}) — {e.reason}" for e in diamonds] or ["None today."]
+    md += ["", "## Ranked", ""]
     md += [f"{i}. **{e.rating}/10 · {e.verdict}** [{e.title}]({e.url}) — {e.reason}"
            for i, e in enumerate(entries, 1)]
-    rows = "".join(f"<tr><td>{e.rating}/10</td><td>{html.escape(e.title)}</td></tr>" for e in entries)
-    return Digest("\n".join(md) + "\n", f"<table>{rows}</table>")
+
+    def rows(items):
+        return "".join(f"<tr><td>{e.rating}/10</td><td>{html.escape(e.title)}</td></tr>" for e in items)
+
+    page = (f"<h2>Diamonds in the rough</h2><table>{rows(diamonds)}</table>"
+            f"<h2>Ranked</h2><table>{rows(entries)}</table>")
+    return Digest("\n".join(md) + "\n", page)
