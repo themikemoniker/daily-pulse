@@ -6,6 +6,7 @@ TOML but cannot write it), so it is regenerated whole and atomically. It holds p
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import tomllib
@@ -21,9 +22,19 @@ MERGE = {
     ("x", "usernames"): "usernames",
     ("instagram", "accounts"): "accounts",
 }
-INERT = {"x": "paid and off until paid_api_approved = true", "instagram": "needs a configured Instagram CLI"}
-HEADER = ("# Creators to watch. Managed by `daily-pulse watch add|list|remove`: edits by hand are kept\n"
-          "# only if they stay plain lists of strings. Public handles only; nothing private goes here.\n")
+INERT = {"x": "stored; X stays off until it is enabled", "instagram": "stored; needs a configured Instagram CLI"}
+HEADER = ("# Creators to watch. Managed by `daily-pulse watch add|list|remove`: the file is regenerated on\n"
+          "# every change, so hand-written comments are not kept. Public handles only; nothing private here.\n")
+# first path segments that are site pages, not accounts
+RESERVED = {
+    "github": {"orgs", "sponsors", "topics", "settings", "features", "marketplace", "users", "explore",
+               "notifications", "pulls", "issues", "login", "join", "search", "trending", "collections",
+               "about", "pricing", "enterprise", "organizations", "apps", "sessions", "new"},
+    "x": {"home", "i", "search", "explore", "intent", "hashtag", "settings", "notifications", "messages",
+          "compose", "login", "signup", "share", "tos", "privacy", "about"},
+    "instagram": {"p", "reel", "reels", "explore", "stories", "tv", "accounts", "direct", "about", "web",
+                  "legal", "developer", "challenge"},
+}
 
 _GH_USER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 _GH_REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
@@ -109,6 +120,9 @@ def parse_target(text: str, source: str | None = None) -> tuple[str, str, str]:
             return "youtube", "channels", _youtube(parts)
         if not parts:
             raise WatchError(f"no account in {text!r}")
+        if parts[0].lower() in RESERVED[found]:
+            raise WatchError(f"{text!r} is a {found} page, not an account: use the profile link "
+                             f"(for a post, the link of the account that made it)")
         if found == "github":
             return _entry("github", "/".join(parts[:2]))
         return _entry(found, parts[0])
@@ -132,8 +146,12 @@ def load(path: Path) -> dict[str, dict[str, list[str]]]:
     if not path.exists():
         return data
     try:
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as exc:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise WatchError(f"cannot read {path}: {exc}") from None
+    try:
+        raw = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
         raise WatchError(f"{path} is not valid TOML: {exc}") from None
     for source, table in raw.items():
         if source not in data or not isinstance(table, dict):
@@ -152,17 +170,24 @@ def render(data: dict[str, dict[str, list[str]]]) -> str:
     for source, table in data.items():
         out.append(f"\n[{source}]\n")
         for key, values in table.items():
-            body = "".join(f'  "{v}",\n' for v in values)
+            body = "".join(f"  {json.dumps(v)},\n" for v in values)  # valid TOML basic strings
             out.append(f"{key} = [\n{body}]\n" if values else f"{key} = []\n")
     return "".join(out)
 
 
 def save(path: Path, data: dict[str, dict[str, list[str]]]) -> None:
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(render(data), encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(render(data), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise WatchError(f"cannot write {path}: {exc}") from None
 
 
 def add(path: Path, source: str, key: str, value: str) -> bool:

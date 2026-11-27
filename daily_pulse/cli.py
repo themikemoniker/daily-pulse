@@ -14,7 +14,6 @@ from datetime import date as _date
 from pathlib import Path
 
 from daily_pulse.adapters.registry import register_builtin
-from daily_pulse import watchlist
 from daily_pulse.config import DEFAULT_CONFIG, ConfigError, load_config
 from daily_pulse.digest import parse_time, write_digest
 from daily_pulse.publish import PublishError, publish_site
@@ -22,6 +21,7 @@ from daily_pulse.lock import LockError, LockHeld, RunLock
 from daily_pulse.runner import run_pipeline
 from daily_pulse.site import build_site
 from daily_pulse.state import StateError, atomic_write_json
+from daily_pulse import watchlist
 
 
 def _iso_date(text: str) -> str:
@@ -66,7 +66,6 @@ def _parser() -> argparse.ArgumentParser:
         wp = wsub.add_parser(name, help=text)
         wp.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                         help="main config; the watchlist is watchlist.toml beside it")
-        wp.add_argument("--watchlist", type=Path, default=None, help="watchlist file (default: beside --config)")
         if name != "list":
             wp.add_argument("target", help="a profile URL, or a handle with --source")
             wp.add_argument("--source", choices=watchlist.SOURCES, default=None,
@@ -75,7 +74,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _watch(args) -> int:
-    path = args.watchlist or args.config.parent / "watchlist.toml"
+    path = args.config.parent / "watchlist.toml"  # the file load_config merges into every run
     try:
         if args.watch_command == "list":
             data = watchlist.load(path)

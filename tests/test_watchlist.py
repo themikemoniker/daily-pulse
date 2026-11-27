@@ -53,7 +53,7 @@ def test_parse_target_rejects(text, source, msg):
 
 
 def run(tmp_path, *argv):
-    return main(["watch", *argv[:1], "--watchlist", str(tmp_path / "w.toml"), *argv[1:]])
+    return main(["watch", *argv[:1], "--config", str(tmp_path / "daily-pulse.toml"), *argv[1:]])
 
 
 def test_add_list_remove_roundtrip(tmp_path, capsys):
@@ -61,30 +61,30 @@ def test_add_list_remove_roundtrip(tmp_path, capsys):
     assert run(tmp_path, "add", "swyx", "--source", "x") == 0
     assert run(tmp_path, "add", "can1357/oh-my-pi") == 0
     out = capsys.readouterr().out
-    assert "watching youtube" in out and "paid and off" in out
+    assert "watching youtube" in out and "X stays off" in out
     assert run(tmp_path, "list") == 0
     listed = capsys.readouterr().out
     assert "swyx" in listed and "oh-my-pi  [repo]" in listed and "3 watched" in listed
     assert run(tmp_path, "remove", "swyx", "--source", "x") == 0
     assert run(tmp_path, "remove", "swyx", "--source", "x") == 1  # no longer there
-    assert "swyx" not in watchlist.load(tmp_path / "w.toml")["x"]["usernames"]
+    assert "swyx" not in watchlist.load(tmp_path / "watchlist.toml")["x"]["usernames"]
 
 
 def test_adding_twice_is_idempotent_and_case_insensitive(tmp_path, capsys):
     assert run(tmp_path, "add", "Karpathy", "--source", "github") == 0
     assert run(tmp_path, "add", "karpathy", "--source", "github") == 0
     assert "already watched" in capsys.readouterr().out
-    assert watchlist.load(tmp_path / "w.toml")["github"]["accounts"] == ["Karpathy"]
+    assert watchlist.load(tmp_path / "watchlist.toml")["github"]["accounts"] == ["Karpathy"]
 
 
 def test_bad_input_exits_two_and_writes_nothing(tmp_path, capsys):
     assert run(tmp_path, "add", "karpathy") == 2
     assert "--source" in capsys.readouterr().err
-    assert not (tmp_path / "w.toml").exists()
+    assert not (tmp_path / "watchlist.toml").exists()
 
 
 def test_file_is_deterministic_and_round_trips(tmp_path):
-    p = tmp_path / "w.toml"
+    p = tmp_path / "watchlist.toml"
     watchlist.add(p, "github", "accounts", "a")
     watchlist.add(p, "youtube", "channels", "https://www.youtube.com/@x_y")
     first = p.read_text()
@@ -94,7 +94,7 @@ def test_file_is_deterministic_and_round_trips(tmp_path):
 
 
 def test_malformed_watchlist_is_a_clear_error(tmp_path):
-    p = tmp_path / "w.toml"
+    p = tmp_path / "watchlist.toml"
     p.write_text('[github]\naccounts = "nope"\n')
     with pytest.raises(WatchError, match="list of strings"):
         watchlist.load(p)
@@ -128,3 +128,32 @@ def test_missing_watchlist_changes_nothing_and_malformed_is_a_config_error(tmp_p
     (tmp_path / "watchlist.toml").write_text("[github\n")
     with pytest.raises(ConfigError, match="watchlist.toml"):
         load_config(cfg)
+
+
+@pytest.mark.parametrize("url", ["https://github.com/orgs/anthropics", "https://github.com/topics/agents",
+                                 "https://x.com/home", "https://x.com/i/status/1",
+                                 "https://www.instagram.com/p/Cabc123/", "https://www.instagram.com/reel/Cx/"])
+def test_site_pages_are_not_accounts(url):
+    with pytest.raises(WatchError, match="not an account"):
+        parse_target(url)
+
+
+def test_values_with_quotes_and_backslashes_survive_a_rewrite(tmp_path):
+    p = tmp_path / "watchlist.toml"
+    p.write_text("[github]\naccounts = ['say \"hi\"', 'back\\slash']\n")
+    assert watchlist.add(p, "github", "accounts", "new")
+    assert watchlist.load(p)["github"]["accounts"] == ['say "hi"', "back\\slash", "new"]
+
+
+def test_an_unwritable_target_is_a_clean_error_not_a_traceback(tmp_path, capsys):
+    blocker = tmp_path / "blocked"
+    blocker.write_text("a file where a directory is needed")
+    assert main(["watch", "add", "--config", str(blocker / "daily-pulse.toml"), "karpathy", "--source", "github"]) == 2
+    assert "cannot write" in capsys.readouterr().err
+
+
+def test_an_unreadable_file_is_not_called_invalid_toml(tmp_path):
+    p = tmp_path / "watchlist.toml"
+    p.write_bytes(b"\xff\xfe not utf-8")
+    with pytest.raises(WatchError, match="cannot read"):
+        watchlist.load(p)
