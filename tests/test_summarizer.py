@@ -376,3 +376,9 @@ def test_once_the_cap_is_hit_remaining_items_are_unrated_not_crashes(fake_claude
                               "2026-01-02")
     assert [r.status for r in results] == ["rated", "rated", "unrated", "unrated"]
     assert claude.calls == 2
+
+
+def test_a_binary_that_cannot_start_is_not_retried_or_counted(tmp_path):
+    s = Summarizer(claude_cmd=str(tmp_path / "no-such-claude"), max_calls=5)
+    assert s.rate(repo_item()) is None
+    assert s.calls_made == 0

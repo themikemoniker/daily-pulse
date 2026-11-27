@@ -100,7 +100,11 @@ def parse_reply(text: str, item: Item) -> Rating:
 
 
 class CallFailed(Exception):
-    """The claude process failed, timed out or could not be started."""
+    """The claude process failed or timed out; a retry may help."""
+
+
+class CannotRun(CallFailed):
+    """The claude process could not be started at all; a retry cannot help."""
 
 
 def _one_line(text: str) -> str:
@@ -153,14 +157,15 @@ class Summarizer:
         return rubric.rstrip() + "\n\n" + template.replace("{{ITEM}}", body)
 
     def _call(self, prompt: str) -> str:
-        self.calls_made += 1
         try:
             proc = subprocess.run([*shlex.split(self.claude_cmd), "-p"], input=prompt, text=True,
                                   capture_output=True, timeout=self.timeout)
         except subprocess.TimeoutExpired:
+            self.calls_made += 1
             raise CallFailed(f"timed out after {self.timeout}s") from None
         except (OSError, ValueError) as exc:  # not found, not executable, bad command string
-            raise CallFailed(f"cannot run {self.claude_cmd!r}: {exc}") from None
+            raise CannotRun(f"cannot run {self.claude_cmd!r}: {exc}") from None
+        self.calls_made += 1
         if proc.returncode != 0:
             raise CallFailed(f"exit {proc.returncode}: {proc.stderr.strip()[:200]}")
         return proc.stdout
@@ -183,6 +188,8 @@ class Summarizer:
                 return guard_rating(rating, "\n".join(p for p in (transcript, item.text) if p))
             except (BadReply, CallFailed) as exc:
                 log.warning("%s: attempt %d/%d failed: %s", label, attempt, ATTEMPTS, exc)
+                if isinstance(exc, CannotRun):
+                    break
         log.warning("%s: left unrated", label)
         return None
 
