@@ -229,6 +229,8 @@ class YouTubeAdapter(SourceAdapter):
         self._halted: str | None = None  # set when two videos fail source-level in a run; cleared by list_new
         self._source_failed: set[str] = set()  # videos that failed source-level in this run
         self._counted: set[str] = set()  # ...and whose failure was added to the persistent count
+        self._pending_source: set[str] = set()  # ...failed before any yt-dlp call worked: not counted yet
+        self._ytdlp_worked = False  # a per-video yt-dlp call succeeded in this run
 
     def _yt(self, ctx: AdapterContext):
         return self._client or make_client(ctx.config, ctx.fixtures_dir)
@@ -245,8 +247,8 @@ class YouTubeAdapter(SourceAdapter):
         to). When it is unset the order is detected from the upload dates of the first and last
         entries. Private and deleted placeholders are left out. Duration and view count from the
         listing go to the quality gate, which runs before any per-video call."""
-        self._halted = None
-        self._source_failed, self._counted = set(), set()
+        self._halted, self._ytdlp_worked = None, False
+        self._source_failed, self._counted, self._pending_source = set(), set(), set()
         order = str(ctx.config.get("playlist_order") or "").strip()
         if order not in ("", "newest_first", "oldest_first"):
             raise ValueError(f"playlist_order must be newest_first or oldest_first, got {order!r}")
@@ -359,17 +361,29 @@ class YouTubeAdapter(SourceAdapter):
     def _source_level_failure(self, item: Item, message: str, ctx: AdapterContext) -> None:
         """A yt-dlp failure that says nothing about this video (timeout, rate limit, network, bot
         check, broken binary). One such failure does not stop the source: one odd video (say a very
-        long stream whose `-J` times out) must not block the others, so it is counted for that video
-        (the playlist listing already worked this run). Two different videos failing this way in one
-        run means yt-dlp itself is down: the source stops and this run's counts are taken back, so an
-        outage never costs a video its place. A video that is the only such failure run after run is
-        given up on after SOURCE_MAX_ATTEMPTS runs (see `fetch_details`)."""
+        long stream whose `-J` times out) must not block the others. It is counted toward giving up on
+        the video only in a run where another video's yt-dlp call worked: if nothing worked, yt-dlp
+        (not the video) is broken, and a multi-day outage must never cost a video its place. Two
+        different videos failing this way in one run also means yt-dlp is down: the source stops and
+        this run's counts are taken back. A video counted in SOURCE_MAX_ATTEMPTS runs is given up on
+        (see `fetch_details`)."""
         self._source_failed.add(item.id)
         if len(self._source_failed) >= 2:
             self._halted = message
+            self._pending_source.clear()
             self._uncount(ctx)
+        elif not self._ytdlp_worked:
+            self._pending_source.add(item.id)  # counted if a later video's call works
         elif self._bump(ctx, SOURCE_FAILURES_FILE, item.id) is not None:
             self._counted.add(item.id)
+
+    def _yt_dlp_works(self, ctx: AdapterContext) -> None:
+        """A per-video call succeeded: failures held back so far in this run were that video's own."""
+        self._ytdlp_worked = True
+        for item_id in sorted(self._pending_source):
+            if self._bump(ctx, SOURCE_FAILURES_FILE, item_id) is not None:
+                self._counted.add(item_id)
+        self._pending_source.clear()
 
     def _uncount(self, ctx: AdapterContext) -> None:
         """Take back the source-level counts added in this run."""
@@ -454,8 +468,8 @@ class YouTubeAdapter(SourceAdapter):
         counted = self._load_map(self._state_file(ctx, SOURCE_FAILURES_FILE)).get(item.id)
         if isinstance(counted, int) and counted >= SOURCE_MAX_ATTEMPTS:
             self._drop_ids(ctx, remove={item.id})
-            raise ItemSkipped(f"{item.id}: the only source-level failure in {counted} runs while other "
-                              "videos worked, giving up")
+            raise ItemSkipped(f"{item.id}: yt-dlp failed for this video in {counted} runs in which other "
+                              "videos' yt-dlp calls worked, giving up")
         if self._halted:  # yt-dlp is unusable right now: don't call it again this run
             raise YtDlpError(f"not tried, yt-dlp failed earlier in this run: {self._halted}")
         try:
@@ -467,6 +481,7 @@ class YouTubeAdapter(SourceAdapter):
     def _fetch(self, item: Item, ctx: AdapterContext) -> Item:
         client = self._yt(ctx)
         info = client.info(item.url)
+        self._yt_dlp_works(ctx)
         self._clear_source_count(ctx, item.id)
         item.title = str(info.get("title") or item.title)
         item.author = str(info.get("channel") or info.get("uploader") or item.author)
