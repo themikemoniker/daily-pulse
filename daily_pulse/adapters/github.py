@@ -1,6 +1,7 @@
 """GitHub source: rising repos plus watched accounts, via the REST API."""
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -16,6 +17,12 @@ from daily_pulse.models import Item
 from daily_pulse.state import atomic_write_json
 
 log = logging.getLogger("daily_pulse")
+
+# The order candidates are processed in, which is also what the first-run cap and the per-run
+# `claude -p` call budget keep: releases and new repos before rising repos, tags, star jumps and,
+# last, bare pushes. Within a kind, newest first.
+KIND_ORDER = ("release", "repo", "rising", "tag", "stars", "push")
+DEFAULT_PUSH_MIN_STARS = 25  # a bare push (no release or tag) is news only for a repo this popular
 
 API = "https://api.github.com"
 EXCERPT_CHARS = 400
@@ -90,6 +97,7 @@ class GitHubAdapter(SourceAdapter):
         self._exhausted: dict = {}
         self._errors: list = []
         self._stars: dict = {}
+        self._push_min_stars, self._ignore = DEFAULT_PUSH_MIN_STARS, []  # set per run by list_new
         self.last_run: dict = {"degraded": False, "reason": ""}
 
     def _now(self, ctx: AdapterContext) -> datetime:
@@ -143,6 +151,7 @@ class GitHubAdapter(SourceAdapter):
         self._errors = []
         self.last_run = {"degraded": False, "reason": ""}
         self._stars = self._load_stars(ctx)
+        self._push_min_stars, self._ignore = self._noise_settings(cfg)
         items: list[Item] = []
         # Watched repos first: they are explicitly required and cheap (one call each), so a
         # tight rate limit must not starve them behind the larger account listings.
@@ -181,7 +190,26 @@ class GitHubAdapter(SourceAdapter):
             log.warning("github: degraded: %s", reason)
             self.last_run = {"degraded": True, "reason": reason}
         items.sort(key=lambda i: i.published, reverse=True)
+        items.sort(key=self._kind_rank)  # stable: newest first inside each kind
         return items
+
+    @staticmethod
+    def _kind_rank(item: Item) -> int:
+        kind = item.id.split(":", 1)[0]
+        return KIND_ORDER.index(kind) if kind in KIND_ORDER else len(KIND_ORDER)
+
+    @staticmethod
+    def _noise_settings(cfg: dict) -> tuple[int, list[str]]:
+        stars = cfg.get("push_min_stars", DEFAULT_PUSH_MIN_STARS)
+        if isinstance(stars, bool) or not isinstance(stars, int) or stars < 0:
+            raise ValueError(f"[sources.github] push_min_stars must be a whole number, 0 or more, got {stars!r}")
+        ignore = cfg.get("ignore_repos", [])
+        if not isinstance(ignore, list) or not all(isinstance(g, str) for g in ignore):
+            raise ValueError(f"[sources.github] ignore_repos must be a list of owner/name globs, got {ignore!r}")
+        return stars, [g.lower() for g in ignore]
+
+    def _ignored(self, full_name: str) -> bool:
+        return any(fnmatch.fnmatchcase(full_name.lower(), g) for g in self._ignore)
 
     # -- star baseline (local state: star counts as of the last run) -------------------------
 
@@ -229,7 +257,8 @@ class GitHubAdapter(SourceAdapter):
             "q": f"created:>{since}", "sort": "stars", "order": "desc", "per_page": 10})
         if status != 200 or not isinstance(body, dict) or not isinstance(body.get("items"), list):
             return []
-        return [self._repo_item("rising", r, now, r["created_at"]) for r in body["items"]]
+        return [self._repo_item("rising", r, now, r["created_at"]) for r in body["items"]
+                if not self._ignored(str(r.get("full_name", "")))]
 
     # -- watched accounts ----------------------------------------------------------------
 
@@ -250,7 +279,7 @@ class GitHubAdapter(SourceAdapter):
                 log.warning("github: skipped a malformed repo entry from %s: %s", account, exc)
 
     def _repo(self, ctx, now, r, items, lookback, push_days) -> None:
-        if r.get("fork"):
+        if r.get("fork") or self._ignored(r["full_name"]):
             return
         created = _parse(r["created_at"])
         pushed = _parse(r["pushed_at"]) if r.get("pushed_at") else created
@@ -266,7 +295,8 @@ class GitHubAdapter(SourceAdapter):
         items += releases
         if not releases:
             items += self._tags(ctx, r)
-            if now - pushed <= timedelta(days=push_days):
+            if (now - pushed <= timedelta(days=push_days)
+                    and r.get("stargazers_count", 0) >= self._push_min_stars):
                 item = self._repo_item("push", r, now, r["pushed_at"])
                 item.id = f"push:{r['full_name']}:{pushed.date().isoformat()}"
                 items.append(item)
@@ -285,6 +315,8 @@ class GitHubAdapter(SourceAdapter):
         return item
 
     def _releases(self, ctx, now, full_name) -> list[Item]:
+        if self._ignored(full_name):
+            return []
         lookback = int(ctx.config.get("lookback_days", 7))
         status, body = self._get(ctx, f"/repos/{full_name}/releases", {"per_page": 5})
         if status != 200 or not isinstance(body, list):
