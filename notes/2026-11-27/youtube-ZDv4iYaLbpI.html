@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Stop Wasting Money on AI APIs: Use Cloudflare Queues</title><link rel="stylesheet" href="../../style.css"></head>
+<body>
+<nav><a href="../../index.html">Today</a><a href="../../archive/index.html">Archive</a></nav>
+<h1>Stop Wasting Money on AI APIs: Use Cloudflare Queues</h1>
+
+<p class="meta">youtube · Cloudflare Developers · cost, batch-api, cloudflare, queues, reliability, anthropic, openai · 2026-11-27</p>
+<p><a href="https://www.youtube.com/watch?v=ZDv4iYaLbpI">Original</a> · <a href="youtube-ZDv4iYaLbpI.md">raw note</a> · <a href="../../days/2026-11-27.html">back to 2026-11-27</a></p>
+<h2>Key takeaways</h2>
+<ul>
+<li>Batch APIs from OpenAI and Anthropic are discounted about 50%, so route any work where nobody is waiting on a response through them.</li>
+<li>Producer pattern: the web app writes the record to a database, enqueues a message and returns immediately, keeping the user-facing path fast.</li>
+<li>The queue consumer receives messages in batches, with a configurable batch size and timeout (whichever is hit first), and submits them as one batch request.</li>
+<li>Retries and a dead letter queue (max three retries here) absorb rate limits, overloads and transient LLM API errors so no message is lost.</li>
+<li>Batch APIs are asynchronous, so a cron trigger polls for in-progress batch IDs and writes completed results back to the database.</li>
+<li>The demo task is classification (category, priority, summary), a typical cheap, latency-tolerant workload suited to batching.</li>
+<li>Queues are now on the Workers free plan (10k operations per day); paid is 1M per month included, then $0.40 per million.</li>
+<li>Acknowledging messages explicitly after successful submission is key to the at-least-once guarantee.</li>
+</ul>
+<h2>The argument, beat by beat</h2>
+<ul>
+<li>[00:00] Pitch: Queues are now on the free plan, and pairing them with batch APIs gives 50% off tokens when users are not waiting.</li>
+<li>[00:30] Demo of a feedback classifier app; submissions return instantly and show as in progress in D1.</li>
+<li>[01:22] Cron trigger in Wrangler polls Anthropic for in-progress batch IDs and writes completed results back to D1.</li>
+<li>[01:52] Producer code: the API handler creates an ID, inserts into D1, sends to the queue and returns JSON.</li>
+<li>[02:17] Consumer config: batch size three, 60s timeout, max three retries; it builds requests and sends them to the Anthropic API, then acks.</li>
+<li>[03:05] Results arrive: categories, priorities and summaries are upserted into D1.</li>
+<li>[03:46] Reliability: retries with backoff and a dead letter queue mean messages are never lost when LLM APIs fail.</li>
+<li>[04:30] Summary and pricing: free tier 10k ops per day, paid 1M per month then 40 cents per million.</li>
+</ul>
+<h2>Quotes</h2>
+<blockquote>If a user isn&#x27;t actively waiting on an AI response, don&#x27;t call the model online.</blockquote>
+<h2>Rating</h2>
+<p><strong>5/10</strong> — Concrete cost-saving pattern for model routing and cost (batch APIs plus queues with retries), but it is Cloudflare-specific, shallow, and says nothing on evals, maker-checker, orchestration or accounting-firm guard rails.</p>
+<h2>Verdict</h2>
+<p>skim</p>
+</body></html>

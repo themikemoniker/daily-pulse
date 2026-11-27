@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-11-27T21:58:33+00:00",
+  "min_rating": 5,
+  "sources": {
+    "github": {
+      "status": "ok"
+    },
+    "instagram": {
+      "status": "deferred: no CLI configured"
+    },
+    "x": {
+      "status": "deferred: no usable read route"
+    },
+    "youtube": {
+      "status": "ok"
+    }
+  }
+}

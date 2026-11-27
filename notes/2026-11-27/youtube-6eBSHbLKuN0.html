@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Mastering Claude Code in 30 minutes</title><link rel="stylesheet" href="../../style.css"></head>
+<body>
+<nav><a href="../../index.html">Today</a><a href="../../archive/index.html">Archive</a></nav>
+<h1>Mastering Claude Code in 30 minutes</h1>
+
+<p class="meta">youtube · Anthropic · claude-code, harness, permissions, claude-md, sdk, parallel-sessions, onboarding · 2026-11-27</p>
+<p><a href="https://www.youtube.com/watch?v=6eBSHbLKuN0">Original</a> · <a href="youtube-6eBSHbLKuN0.md">raw note</a> · <a href="../../days/2026-11-27.html">back to 2026-11-27</a></p>
+<h2>Key takeaways</h2>
+<ul>
+<li>Onboard people by having them ask questions about the codebase first; Anthropic says this cut technical onboarding from 2-3 weeks to 2-3 days.</li>
+<li>Ask the agent to plan and get approval before writing code; no special mode is needed, just say so.</li>
+<li>Agents improve sharply when they can check their own work (unit tests, Puppeteer or simulator screenshots) and iterate two or three times.</li>
+<li>Put shared context in a concise, version-controlled CLAUDE.md, with nested files per directory and a managed enterprise-level file.</li>
+<li>Permissions are layered (enterprise policy, project, user): organisations can pre-approve safe commands and block URLs or commands that users cannot override.</li>
+<li>Bash safety relies on read-only command detection, static analysis of combined commands, and allow/deny lists at several levels.</li>
+<li>The headless -p flag is the same SDK as the CLI and works as a Unix-style tool in CI, incident response and pipelines, with JSON output.</li>
+<li>Power users run many parallel sessions using separate repo copies or git worktrees, often over SSH and tmux.</li>
+</ul>
+<h2>The argument, beat by beat</h2>
+<ul>
+<li>[01:26] Positions Claude Code as a fully agentic assistant that works in any IDE or terminal and does not force a workflow.</li>
+<li>[02:56] Initial setup: terminal config, theme, GitHub app, allowed tools list, and voice dictation for prompts.</li>
+<li>[04:13] Start with codebase Q&amp;A, git history analysis and GitHub issues; no indexing, code stays local.</li>
+<li>[07:56] Moving to edits: a small toolset, plan-first prompting, and the commit-push-PR shorthand.</li>
+<li>[09:55] Connect team tools via CLIs and MCP servers; give the agent feedback loops such as tests and screenshots.</li>
+<li>[12:17] Context management with CLAUDE.md, nested files, slash commands, and the settings hierarchy including enterprise policy.</li>
+<li>[18:45] Keyboard shortcuts: auto-accept, hash to remember, bash mode, escape to interrupt, resume.</li>
+<li>[20:53] The headless SDK (-p) used in CI, incident response and Unix-style pipelines.</li>
+<li>[22:37] Advanced use: multiple parallel Claude sessions via worktrees, repo copies and tmux.</li>
+<li>[23:24] Q&amp;A on securing bash commands, multimodal input, why a CLI over an IDE, and internal ML usage.</li>
+</ul>
+<h2>Rating</h2>
+<p><strong>6/10</strong> — Official, concrete coverage of harness setup, permission guard rails, feedback loops and parallel sessions, but it is a general Claude Code intro with nothing on evals, routing, cost or maker-checker, and nothing specific to accounting firms.</p>
+<h2>Verdict</h2>
+<p>skim</p>
+</body></html>

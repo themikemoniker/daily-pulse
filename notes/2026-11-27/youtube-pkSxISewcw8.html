@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>STOP Using Bypass Permissions, Use This New Feature Instead</title><link rel="stylesheet" href="../../style.css"></head>
+<body>
+<nav><a href="../../index.html">Today</a><a href="../../archive/index.html">Archive</a></nav>
+<h1>STOP Using Bypass Permissions, Use This New Feature Instead</h1>
+
+<p class="meta">youtube · Nate Herk | AI Automation · claude-code, permissions, auto-mode, guardrails, harness, prompt-injection, cost · 2026-11-27</p>
+<p><a href="https://www.youtube.com/watch?v=pkSxISewcw8">Original</a> · <a href="youtube-pkSxISewcw8.md">raw note</a> · <a href="../../days/2026-11-27.html">back to 2026-11-27</a></p>
+<h2>Key takeaways</h2>
+<ul>
+<li>Auto mode is a middle path between ask-before-edits (constant interruptions) and bypass permissions (no guardrails).</li>
+<li>A classifier checks each tool call for destructive actions, sensitive data exposure and prompt injection before it runs.</li>
+<li>Risky actions are blocked and Claude tries a different approach instead of stalling the session.</li>
+<li>Sessions cost slightly more, likely because an extra model call reviews every tool call.</li>
+<li>It reduces risk but does not eliminate it; Anthropic recommends isolated environments.</li>
+<li>Allow/deny lists in the local settings file remain, in the presenter&#x27;s view, the best option in some cases because they are deterministic and per-project.</li>
+<li>Research preview, Team plan only; an admin enables it in organization settings, then it is launched with an enable-auto-mode flag.</li>
+</ul>
+<h2>The argument, beat by beat</h2>
+<ul>
+<li>[00:00] Introduces auto mode as a safer alternative to dangerously skipping permissions for long-running work.</li>
+<li>[00:09] Shows the default ask-before-edits mode and how repeated approval prompts interrupt the workflow.</li>
+<li>[00:49] Explains bypass permissions mode: no interruptions, but risky if unattended.</li>
+<li>[01:08] Describes his earlier workaround, a local settings file with allow, deny and ask lists, usable per project or globally.</li>
+<li>[01:38] Demonstrates switching to auto mode in VS Code and via the CLI flag, and reads the in-app description.</li>
+<li>[02:28] Frames auto mode as fewer interruptions with less risk than skipping all permissions; a classifier reviews each tool call.</li>
+<li>[02:56] Notes the added cost, guessing it comes from an AI check before every tool call.</li>
+<li>[03:11] Covers availability: research preview, Team users only, enabled in organization settings, and how to disable it.</li>
+</ul>
+<h2>Quotes</h2>
+<blockquote>Claude checks each tool for risky actions and prompt injection before executing.</blockquote>
+<blockquote>it reduces risk but it does not eliminate it entirely</blockquote>
+<h2>Rating</h2>
+<p><strong>6/10</strong> — A clear, concrete look at a classifier-gated permission mode, which is relevant to harness guard rails and cost trade-offs, but it is shallow, with no evals, no firm-specific guidance and no depth on how the classifier performs.</p>
+<h2>Verdict</h2>
+<p>skim</p>
+</body></html>

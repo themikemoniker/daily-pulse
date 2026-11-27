@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Spikee #1 - LLM Benchmarking/Testing Tool for Prompt Injection</title><link rel="stylesheet" href="../../style.css"></head>
+<body>
+<nav><a href="../../index.html">Today</a><a href="../../archive/index.html">Archive</a></nav>
+<h1>Spikee #1 - LLM Benchmarking/Testing Tool for Prompt Injection</h1>
+
+<p class="meta">youtube · Donato Capitella · prompt-injection, evals, guardrails, benchmarking, security, spikee · 2026-11-27</p>
+<p><a href="https://www.youtube.com/watch?v=bsBnQlo28tg">Original</a> · <a href="youtube-bsBnQlo28tg.md">raw note</a> · <a href="../../days/2026-11-27.html">back to 2026-11-27</a></p>
+<h2>Key takeaways</h2>
+<ul>
+<li>Treat prompt injection (attacking an app to hit other users or data) as separate from jailbreaking (breaking model alignment); test for the first one in client apps.</li>
+<li>Build a custom dataset for the specific use case (summarise, Q&amp;A) rather than relying on generic benchmarks; the bundled dataset is deliberately basic.</li>
+<li>Test the model alone, the input guardrail alone, and the full application pipeline; each answers a different question.</li>
+<li>Compare configurations: plain prompt, system message only, data markers (spotlighting) only, and both. Success is measured by whether a canary string appears in the output.</li>
+<li>In this benchmark Claude models resisted best even without mitigations, o1 did well, and DeepSeek R1 and V3 did worst.</li>
+<li>Summarisation tasks were more exposed to injected instructions than direct question answering.</li>
+<li>Guardrails must be judged on false positives as well as detection; a 30-document benign set was used. InjectGuard had 100% detection with 3.3% false positives, and Prompt Guard had a worse false-positive rate.</li>
+<li>Output handling matters: unencoded model output can become XSS or markdown-image data exfiltration.</li>
+</ul>
+<h2>The argument, beat by beat</h2>
+<ul>
+<li>[00:00] Spikee is introduced as a consolidation of two years of client LLM security testing scripts, aimed at pentesters and developers.</li>
+<li>[02:47] Jailbreaking versus prompt injection: the former attacks the model&#x27;s alignment, the latter exploits an application to attack users or organisations.</li>
+<li>[05:26] Email summarise-button example showing an injected instruction producing XSS or markdown exfiltration, versus a safe response that treats it as data.</li>
+<li>[11:51] Mitigations to evaluate: a system message telling the model to ignore document instructions, and spotlighting with data markers.</li>
+<li>[13:39] Use cases: standalone LLM benchmark, custom datasets, guardrail testing and full application pipeline testing.</li>
+<li>[15:36] Targeted-12-2024 dataset: 1,912 English entries across summary and Q&amp;A, with and without system message and markers, using several jailbreak patterns and goals.</li>
+<li>[20:32] Benchmark results by model and configuration; Claude and o1 strongest, DeepSeek weakest; caveat that the dataset is basic.</li>
+<li>[26:02] Guardrail benchmark of InjectGuard, Azure Prompt Shields, Bedrock guardrails and Meta Prompt Guard on detection and false positives.</li>
+</ul>
+<h2>Rating</h2>
+<p><strong>6/10</strong> — Concrete eval and guardrail testing methodology with model comparisons, useful for a consultant&#x27;s guard rails and evals work, but security-focused and with no multi-agent, maker-checker or accounting angle; the video is also dated (Feb 2025).</p>
+<h2>Verdict</h2>
+<p>skim</p>
+</body></html>
