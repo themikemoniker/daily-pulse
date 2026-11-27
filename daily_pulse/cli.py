@@ -12,6 +12,7 @@ import tomllib
 from datetime import date as _date
 from pathlib import Path
 
+from daily_pulse.adapters.registry import register_builtin
 from daily_pulse.config import DEFAULT_CONFIG, ConfigError, load_config
 from daily_pulse.digest import parse_time, write_digest
 from daily_pulse.lock import LockError, LockHeld, RunLock
@@ -57,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, tomllib.TOMLDecodeError, ConfigError) as exc:
         print(f"daily-pulse: cannot load config {args.config}: {exc}", file=sys.stderr)
         return 1
+    register_builtin()
     date = args.date or _date.today().isoformat()
     if args.command == "digest":
         return _digest(args, config, date)

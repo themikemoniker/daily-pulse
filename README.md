@@ -48,3 +48,9 @@ HTML and one shared `style.css` (light/dark via `prefers-color-scheme`, no JavaS
 and `notes/<date>/<note>.html`. It copies `notes/*.md` and `digests/<date>.{md,html}` into the tree and
 reads nothing else, so `data/` can never reach the site. Pages are built from the site's own `notes/`, so
 earlier days stay in the archive; a rebuild is byte-identical.
+
+## Deferred sources
+
+- **X: deferred** (`deferred: no usable read route`). Blockers: no X connector exists on the host, the X API free tier cannot read other accounts' posts, and raw scraping is forbidden. To unblock: provide a connector or a paid API tier that can read the accounts, then implement `list_new`/`fetch_details` in `daily_pulse/adapters/x.py`. The seed handles stay in `[sources.x].handles`.
+- **Instagram: deferred until a CLI is configured** (`deferred: no CLI configured`). Blocker: no sanctioned read access to saved/liked reels. To unblock: set `IG_CLI_CMD` to a command that prints the JSON described in `docs/instagram-adapter.md` (saved reels first, then liked). Items carry metadata and a short caption excerpt only; they are rated through the summarizer.
+- Both modules appear in the run result with their status and never fail the run.
