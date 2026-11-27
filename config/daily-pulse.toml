@@ -62,5 +62,5 @@ watch_accounts = [
 watch_repos = ["can1357/oh-my-pi"]  # releases, plus top contributors
 push_min_stars = 25         # a push with no release or tag counts only for a repo with at least this many stars
 ignore_repos = [            # owner/name globs (case-insensitive): no items at all from these repos
-  "simonw/simonw", "simonw/scrape-*", "simonw/*-scraper", "simonw/*-atom-feed",  # push every day, no signal
+  "simonw/simonw", "simonw/scrape-*", "simonw/*-scraper", "simonw/*-atom-feed", "simonw/*-backup",  # push every day, no signal
 ]

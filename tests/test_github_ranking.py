@@ -107,4 +107,6 @@ def test_the_shipped_config_ignores_the_known_noisy_repos_and_sets_the_threshold
     cfg = tomllib.loads((Path(__file__).resolve().parent.parent / "config" / "daily-pulse.toml").read_text())
     gh = cfg["sources"]["github"]
     assert gh["push_min_stars"] >= 1
-    assert {"simonw/simonw", "simonw/scrape-*"} <= set(gh["ignore_repos"])
+    assert {"simonw/simonw", "simonw/scrape-*", "simonw/*-backup"} <= set(gh["ignore_repos"])
+    import fnmatch  # the live run's noisy repo is covered by a shipped glob
+    assert any(fnmatch.fnmatchcase("simonw/simonwillisonblog-backup", g) for g in gh["ignore_repos"])
