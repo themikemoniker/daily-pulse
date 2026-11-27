@@ -1,3 +1,5 @@
+import pathlib
+
 import pytest
 
 from daily_pulse.models import Item
@@ -440,3 +442,70 @@ def test_beats_and_tags_are_checked_so_bad_ones_get_the_retry(fake_claude, field
     claude = fake_claude(good(**{field: bad}), good())
     assert Summarizer(claude_cmd=str(claude.path)).rate(repo_item()) is not None
     assert claude.calls == 2
+
+
+def test_a_hung_claude_and_its_helper_processes_are_killed_promptly(tmp_path):
+    import os
+    import time
+
+    pidfile = tmp_path / "grandchild.pid"
+    script = tmp_path / "claude-with-helper"
+    # Like node/MCP helpers: a grandchild that inherits the pipes and outlives the timeout.
+    script.write_text(f"#!/bin/sh\nsleep 20 &\necho $! > {pidfile}\nwait\n")
+    script.chmod(0o755)
+    s = Summarizer(claude_cmd=str(script), timeout=0.5, max_calls=1)
+    start = time.monotonic()
+    assert s.rate(repo_item()) is None
+    assert time.monotonic() - start < 8
+    pid = int(pidfile.read_text())
+    for _ in range(40):  # the helper must be gone (a zombie awaiting reaping counts as gone)
+        try:
+            state = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except OSError:
+            break
+        if state == "Z":
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(pid, 9)
+        pytest.fail("the helper process survived the timeout")
+
+
+def test_claude_runs_with_no_tools_from_a_neutral_directory(fake_claude):
+    import os
+
+    claude = fake_claude(good())
+    Summarizer(claude_cmd=str(claude.path)).rate(repo_item())
+    argv = claude.argv(0)
+    assert argv[argv.index("--tools") + 1] == ""  # an empty tool list: nothing to hijack
+    assert "-p" in argv
+    cwd = pathlib.Path(claude.cwd(0))
+    assert cwd != pathlib.Path.cwd() and not cwd.is_relative_to(pathlib.Path.cwd())
+    assert not (cwd / "CLAUDE.md").exists() and not (cwd / "AGENTS.md").exists()
+    assert not cwd.exists()  # the scratch directory is removed after the call
+    assert os.getcwd() == str(pathlib.Path.cwd())
+
+
+def test_non_ascii_items_survive_a_non_utf8_locale(fake_claude, tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    reply = json.dumps(good(summary="Résumé de l'agent — café"), ensure_ascii=False)
+    claude = fake_claude(reply)
+    code = (
+        "from daily_pulse.models import Item\n"
+        "from daily_pulse.summarizer import Summarizer\n"
+        "s = Summarizer(claude_cmd=%r)\n"
+        "r = s.rate(Item('github', 'x', 'https://x', 'Évals — naïve café', 'zoë'))\n"
+        "print(r.summary, s.calls_made)\n" % str(claude.path)
+    )
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C", "PYTHONCOERCECLOCALE": "0",
+           "PYTHONUTF8": "0", "PYTHONIOENCODING": "utf-8"}
+    script = tmp_path / "run.py"  # a file, not -c: argv would be mangled by the C locale
+    script.write_text(code, encoding="utf-8")
+    out = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, encoding="utf-8",
+                         cwd=pathlib.Path(__file__).parent.parent)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "Résumé de l'agent — café 1"  # one call: no decode error, no retry
+    assert "Évals — naïve café" in claude.stdin(0)

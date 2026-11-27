@@ -11,7 +11,9 @@ import logging
 import os
 import re
 import shlex
+import signal
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -159,26 +161,50 @@ class Summarizer:
             body += "\n\nTranscript/caption:\n" + transcript
         return rubric.rstrip() + "\n\n" + template.replace("{{ITEM}}", body)
 
+    def _argv(self) -> list[str]:
+        # Item text and transcripts are untrusted, so claude gets no tools (nothing for injected
+        # instructions to run), no skills, no MCP servers and no saved session.
+        return [*shlex.split(self.claude_cmd), "-p", "--tools", "", "--disable-slash-commands",
+                "--strict-mcp-config", "--no-session-persistence"]
+
     def _call(self, prompt: str) -> str:
+        """One `claude -p` run, in its own process group and an empty scratch directory (so it
+        loads none of this repo's CLAUDE.md/AGENTS.md). On timeout the whole group is killed:
+        helper processes (node, MCP servers) would otherwise hold the pipes open."""
         try:
-            proc = subprocess.run([*shlex.split(self.claude_cmd), "-p"], input=prompt, text=True,
-                                  capture_output=True, timeout=self.timeout)
-        except subprocess.TimeoutExpired:
-            self.calls_made += 1
-            raise CallFailed(f"timed out after {self.timeout}s") from None
-        except UnicodeError as exc:  # the process ran, but its output (or our prompt) is not text
-            self.calls_made += 1
-            raise CallFailed(f"undecodable output or prompt: {exc}") from None
+            with tempfile.TemporaryDirectory(prefix="daily-pulse-claude-") as scratch:
+                proc = subprocess.Popen(
+                    self._argv(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=scratch, start_new_session=True, encoding="utf-8", errors="replace")
+                try:
+                    stdout, stderr = proc.communicate(prompt, timeout=self.timeout)
+                except subprocess.TimeoutExpired:
+                    self.calls_made += 1
+                    raise CallFailed(f"timed out after {self.timeout}s") from None
+                finally:
+                    self._kill_group(proc)  # helpers that outlive a finished claude
         except (OSError, ValueError) as exc:  # not found, not executable, bad command string
             raise CannotRun(f"cannot run {self.claude_cmd!r}: {exc}") from None
         self.calls_made += 1
         if proc.returncode != 0:
-            raise CallFailed(f"exit {proc.returncode}: {proc.stderr.strip()[:200]}")
-        return proc.stdout
+            raise CallFailed(f"exit {proc.returncode}: {stderr.strip()[:200]}")
+        return stdout
+
+    @staticmethod
+    def _kill_group(proc: subprocess.Popen) -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.communicate(timeout=5)  # reap and drain; never wait on a stray pipe holder
+        except (subprocess.TimeoutExpired, ValueError):
+            pass
 
     def rate(self, item: Item, transcript: str = "") -> Rating | None:
         """The item's rating, or None (logged) when it could not be rated: claude never gave a
-        valid reply, the process failed, or the per-run call cap was reached. Never raises."""
+        valid reply, the process failed, or the per-run call cap was reached. Bad replies and process
+        failures never raise; `summarize_items` also guards against anything unexpected."""
         label = f"{item.source}-{item.id}"
         try:
             prompt = self._prompt(item, transcript)
