@@ -343,3 +343,128 @@ def test_digest_carries_no_quotes_or_transcript_text(tmp_path):
 
     assert "alpha bravo" not in d.markdown and "alpha bravo" not in d.html
     assert "Quoted talk" in d.markdown
+
+
+# --- CLI: `daily-pulse digest` ---------------------------------------------------------------
+import json  # noqa: E402
+
+from daily_pulse.cli import main  # noqa: E402
+
+
+def cli_digest(cfg, out, *extra):
+    return main(["digest", "--config", str(cfg), "--out", str(out), "--date", DATE, *extra])
+
+
+def seeded_out(tmp_path, run_json=True):
+    out = tmp_path / "out"
+    add_note(out / "notes", "r1", "A repo", 9, age_hours=2, url="https://github.com/o/r")
+    if run_json:
+        (out / f"run-{DATE}.json").write_text(json.dumps({
+            "date": DATE,
+            "sources": {"github": {"status": "ok", "items": [{}]},
+                        "x": {"status": "deferred: no usable route", "items": []}},
+            "flagged": [],
+        }))
+    return out
+
+
+def test_digest_command_builds_files_from_notes_and_run_result(make_env, tmp_path):
+    cfg, _data, _out = make_env(extra='[site]\nbase_url = "https://example.test/pulse/"\n')
+    out = seeded_out(tmp_path)
+
+    assert cli_digest(cfg, out) == 0
+
+    md = (out / "digests" / f"{DATE}.md").read_text(encoding="utf-8")
+    page = Page((out / "digests" / f"{DATE}.html").read_text(encoding="utf-8"))
+    assert status_lines(md) == {"github": "ok, 1 item", "x": "deferred: no usable route"}
+    assert "A repo" in diamonds_md(md)
+    assert f"https://example.test/pulse/notes/{DATE}/github-r1.md" in page.values("href")
+
+
+def test_digest_command_base_url_flag_overrides_config(make_env, tmp_path):
+    cfg, _data, _out = make_env(extra='[site]\nbase_url = "https://example.test/pulse/"\n')
+    out = seeded_out(tmp_path)
+
+    assert cli_digest(cfg, out, "--base-url", "https://other.test/") == 0
+
+    hrefs = Page((out / "digests" / f"{DATE}.html").read_text(encoding="utf-8")).values("href")
+    assert f"https://other.test/notes/{DATE}/github-r1.md" in hrefs
+    assert not any(h.startswith("https://example.test") for h in hrefs)
+
+
+def test_digest_command_rerun_is_identical(make_env, tmp_path):
+    cfg, _data, _out = make_env()
+    out = seeded_out(tmp_path)
+    assert cli_digest(cfg, out) == 0
+    first = [(out / "digests" / f"{DATE}{ext}").read_bytes() for ext in (".md", ".html")]
+
+    assert cli_digest(cfg, out) == 0
+
+    assert [(out / "digests" / f"{DATE}{ext}").read_bytes() for ext in (".md", ".html")] == first
+
+
+def test_digest_command_without_a_run_result_still_builds(make_env, tmp_path):
+    cfg, _data, _out = make_env()
+    out = seeded_out(tmp_path, run_json=False)
+
+    assert cli_digest(cfg, out) == 0
+
+    assert status_lines((out / "digests" / f"{DATE}.md").read_text(encoding="utf-8")) == {"github": "ok, 1 item"}
+
+
+def test_digest_command_survives_a_corrupt_run_result(make_env, tmp_path, capsys):
+    cfg, _data, _out = make_env()
+    out = seeded_out(tmp_path, run_json=False)
+    (out / f"run-{DATE}.json").write_text("{not json")
+
+    assert cli_digest(cfg, out) == 0
+
+    assert "run-2026-01-15.json" in capsys.readouterr().err
+    assert (out / "digests" / f"{DATE}.md").exists()
+
+
+def test_digest_command_on_a_day_with_nothing_still_writes_a_page(make_env, tmp_path):
+    cfg, _data, _out = make_env()
+
+    assert cli_digest(cfg, tmp_path / "empty") == 0
+
+    assert "No items today." in (tmp_path / "empty" / "digests" / f"{DATE}.md").read_text(encoding="utf-8")
+
+
+def test_shipped_config_has_the_live_site_url():
+    from daily_pulse.config import DEFAULT_CONFIG, load_config
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    assert load_config(root / DEFAULT_CONFIG).base_url == "https://themikemoniker.github.io/daily-pulse/"
+
+
+def test_non_string_base_url_is_a_config_error(make_env, tmp_path, capsys):
+    cfg, _data, _out = make_env(extra="[site]\nbase_url = 5\n")
+
+    assert cli_digest(cfg, tmp_path / "out") == 1
+    assert "base_url" in capsys.readouterr().err
+
+
+def test_a_corrupt_note_is_skipped_not_fatal(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "good", "Good item", 5)
+    (notes / DATE / "github-garbage.md").write_text("not a note at all")
+    (notes / DATE / "github-binary.md").write_bytes(b"---\n\xff\xfe\n---\n")
+    (notes / DATE / "github-badrating.md").write_text('---\ntitle: "x"\n---\n\n**ten/10** — r\n')
+    (notes / DATE / ".hidden.tmp").write_text("---\n---\n")
+
+    d = digest(notes)
+
+    assert "Good item" in d.markdown
+    assert status_lines(d.markdown) == {"github": "ok, 1 item"}
+
+
+def test_malformed_source_entries_do_not_break_the_digest(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "a", "Item", 5)
+    sources = {"github": "ok", "x": None, "youtube": {"status": ["weird"]}, "instagram": {"items": []}}
+
+    lines = status_lines(digest(notes, sources).markdown)
+
+    assert set(lines) == {"github", "x", "youtube", "instagram"}

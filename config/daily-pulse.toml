@@ -7,6 +7,9 @@ alert_after_failures = 2    # consecutive module failures before a run flags it
 [paths]
 data_dir = "../data"        # local-only state, logs, transcripts (gitignored); relative to this file
 
+[site]
+base_url = "https://themikemoniker.github.io/daily-pulse/"  # digest links are built from this
+
 [sources.youtube]
 enabled = true
 playlist_url = ""           # unset until supplied; the module reports "not configured"

@@ -17,6 +17,7 @@ class Config:
     data_dir: Path
     first_run_cap: int = 10
     alert_after_failures: int = 2
+    base_url: str = ""  # public site root; digest links are built from it
     sources: dict[str, dict] = field(default_factory=dict)
 
 
@@ -42,6 +43,10 @@ def load_config(path: Path) -> Config:
     path = Path(path)
     raw = tomllib.loads(path.read_text())
     run, paths, sources = _table(raw, "run"), _table(raw, "paths"), _table(raw, "sources")
+    site = _table(raw, "site")
+    base_url = site.get("base_url", "")
+    if not isinstance(base_url, str):
+        raise ConfigError(f"site.base_url must be a string, got {base_url!r}")
     data_dir = paths.get("data_dir", "data")
     if not isinstance(data_dir, str) or not data_dir:
         raise ConfigError(f"paths.data_dir must be a non-empty string, got {data_dir!r}")
@@ -54,5 +59,6 @@ def load_config(path: Path) -> Config:
         data_dir=path.parent / data_dir,
         first_run_cap=_int(run, "first_run_cap", 10, 0, "run.first_run_cap"),
         alert_after_failures=_int(run, "alert_after_failures", 2, 1, "run.alert_after_failures"),
+        base_url=base_url.strip(),
         sources=sources,
     )

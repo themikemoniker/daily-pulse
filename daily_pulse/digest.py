@@ -86,9 +86,17 @@ def _parse_note(path: Path) -> Entry | None:
     )
 
 
+def _try_parse(path: Path) -> Entry | None:
+    """A note that cannot be read or understood is skipped: one bad file must not cost the day's digest."""
+    try:
+        return _parse_note(path)
+    except (OSError, ValueError, TypeError):  # UnicodeDecodeError is a ValueError
+        return None
+
+
 def _load(notes_dir: Path, date: str) -> list[Entry]:
     day = Path(notes_dir) / date
-    entries = [e for p in sorted(day.glob("*.md")) if (e := _parse_note(p))] if day.is_dir() else []
+    entries = [e for p in sorted(day.glob("*.md")) if (e := _try_parse(p))] if day.is_dir() else []
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     entries.sort(key=lambda e: (-e.rating, -(e.published or epoch).timestamp(), e.source, e.stem))
     return entries
@@ -117,7 +125,12 @@ def _status_lines(entries: list[Entry], sources: dict | None) -> list[tuple[str,
     names = list(sources or {}) + sorted(n for n in counts if n not in (sources or {}))
     lines = []
     for name in names:
-        status = str((sources or {}).get(name, {}).get("status", "ok"))
+        if name not in (sources or {}):
+            status = "ok"  # notes exist for a source the run result does not mention
+        else:
+            entry = sources[name]
+            status = entry.get("status") if isinstance(entry, dict) else None
+            status = " ".join(status.split()) if isinstance(status, str) and status.strip() else "unknown"
         if status == "ok":
             n = counts.get(name, 0)
             status = f"ok, {n} item{'' if n == 1 else 's'}"
