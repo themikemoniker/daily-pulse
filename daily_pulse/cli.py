@@ -17,6 +17,7 @@ from daily_pulse.config import DEFAULT_CONFIG, ConfigError, load_config
 from daily_pulse.digest import parse_time, write_digest
 from daily_pulse.lock import LockError, LockHeld, RunLock
 from daily_pulse.runner import run_pipeline
+from daily_pulse.site import build_site
 from daily_pulse.state import StateError, atomic_write_json
 
 
@@ -42,11 +43,18 @@ def _parser() -> argparse.ArgumentParser:
     d.add_argument("--out", type=Path, required=True,
                    help="output directory holding notes/ and run-<date>.json; digests/ is written here")
     d.add_argument("--base-url", default=None, help="site root for absolute links (default: config site.base_url)")
+    s = sub.add_parser("site", help="build the static site from notes and digests")
+    s.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    s.add_argument("--date", default=None, type=_iso_date, help="day shown on index.html (default: today)")
+    s.add_argument("--out", type=Path, required=True, help="output directory holding notes/ and digests/")
+    s.add_argument("--site", type=Path, default=None, help="site directory (default: <out>/site)")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "site":  # reads no config: it only needs the output directory
+        return _site(args, args.date or _date.today().isoformat())
     try:
         config = load_config(args.config)
     except (OSError, tomllib.TOMLDecodeError, ConfigError) as exc:
@@ -93,6 +101,16 @@ def _digest(args, config, date: str) -> int:
         write_digest(args.out / "notes", args.out / "digests", date, sources=sources, base_url=base_url, now=now)
     except Exception as exc:  # noqa: BLE001 - whatever went wrong, say so cleanly rather than a traceback
         print(f"daily-pulse: cannot write digest under {args.out / 'digests'}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _site(args, date: str) -> int:
+    site = args.site or args.out / "site"
+    try:
+        build_site(args.out, site, date)
+    except Exception as exc:  # noqa: BLE001 - say so cleanly rather than a traceback
+        print(f"daily-pulse: cannot build site at {site}: {exc}", file=sys.stderr)
         return 1
     return 0
 

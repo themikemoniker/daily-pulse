@@ -40,6 +40,15 @@ identical files.
 - The binary is `[summarizer] claude_cmd` or, if set, `$DAILY_PULSE_CLAUDE` (a command string; tests point it at a fake script). Tests never run the real `claude`.
 - Returned ratings pass through the quote guard against the transcript and the item excerpt: no run of more than 40 copied words, and quoted words capped under 50 per item. Not yet called by the runner; the digest ticket plugs in.
 
+## Static site
+
+`daily-pulse site --out <dir> [--date YYYY-MM-DD] [--site DIR]` builds `<dir>/site/` (default) in plain
+HTML and one shared `style.css` (light/dark via `prefers-color-scheme`, no JavaScript, no external assets):
+`index.html` (the day's ranked digest with a diamond callout), `archive/index.html`, `days/<date>.html`
+and `notes/<date>/<note>.html`. It copies `notes/*.md` and `digests/<date>.{md,html}` into the tree and
+reads nothing else, so `data/` can never reach the site. Pages are built from the site's own `notes/`, so
+earlier days stay in the archive; a rebuild is byte-identical.
+
 ## Deferred sources
 
 - **X: deferred** (`deferred: no usable read route`). Blockers: no X connector exists on the host, the X API free tier cannot read other accounts' posts, and raw scraping is forbidden. To unblock: provide a connector or a paid API tier that can read the accounts, then implement `list_new`/`fetch_details` in `daily_pulse/adapters/x.py`. The seed handles stay in `[sources.x].handles`.
