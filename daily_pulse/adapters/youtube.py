@@ -30,7 +30,7 @@ WATCH_URL = "https://www.youtube.com/watch?v="
 DESCRIPTION_EXCERPT = 500  # characters of the video description given to the rater
 UNAVAILABLE_TITLES = ("[private video]", "[deleted video]")  # placeholders that can never be fetched
 MAX_ATTEMPTS = 3  # video-specific yt-dlp failures for one video before it is given up on
-SOURCE_MAX_ATTEMPTS = 3  # runs in which a video was the only source-level failure before it is given up on
+SOURCE_MAX_ATTEMPTS = 5  # runs in which a video was the only source-level failure before it is given up on
 RECENT_DAYS = 2  # a video uploaded this recently may not have captions yet
 CAPTION_WAIT_DAYS = 3  # how long, from first sight, a video with no captions is waited for
 # yt-dlp errors that say nothing about one video (rate limit, throttling, server trouble, DNS,
@@ -228,8 +228,7 @@ class YouTubeAdapter(SourceAdapter):
         self._client = client
         self._halted: str | None = None  # set when two videos fail source-level in a run; cleared by list_new
         self._source_failed: set[str] = set()  # videos that failed source-level in this run
-        self._pending_source: set[str] = set()  # ...not yet counted: nothing has proven yt-dlp works
-        self._ytdlp_worked = False  # a per-video call succeeded in this run
+        self._counted: set[str] = set()  # ...and whose failure was added to the persistent count
 
     def _yt(self, ctx: AdapterContext):
         return self._client or make_client(ctx.config, ctx.fixtures_dir)
@@ -246,8 +245,8 @@ class YouTubeAdapter(SourceAdapter):
         to). When it is unset the order is detected from the upload dates of the first and last
         entries. Private and deleted placeholders are left out. Duration and view count from the
         listing go to the quality gate, which runs before any per-video call."""
-        self._halted, self._ytdlp_worked = None, False
-        self._source_failed, self._pending_source = set(), set()
+        self._halted = None
+        self._source_failed, self._counted = set(), set()
         order = str(ctx.config.get("playlist_order") or "").strip()
         if order not in ("", "newest_first", "oldest_first"):
             raise ValueError(f"playlist_order must be newest_first or oldest_first, got {order!r}")
@@ -256,7 +255,8 @@ class YouTubeAdapter(SourceAdapter):
         items = [self._listed(e) for e in entries
                  if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
                  and str(e.get("title") or "").strip().lower() not in UNAVAILABLE_TITLES]
-        self._prune_state(ctx, {i.id for i in items})
+        if items:  # an empty listing is more likely a hiccup than a playlist with nothing left
+            self._prune_state(ctx, {i.id for i in items})
         if items and all(i.published for i in items):  # real dates beat any declared order
             return sorted(items, key=lambda i: i.published, reverse=True)
         order = order or self._detect_order(client, url, items, ctx)
@@ -359,25 +359,44 @@ class YouTubeAdapter(SourceAdapter):
     def _source_level_failure(self, item: Item, message: str, ctx: AdapterContext) -> None:
         """A yt-dlp failure that says nothing about this video (timeout, rate limit, network, bot
         check, broken binary). One such failure does not stop the source: one odd video (say a very
-        long stream whose `-J` times out) must not block the others. Two different videos failing this
-        way in one run means yt-dlp itself is down, so the source stops and nothing is counted.
-        A video that is the only such failure run after run, while other videos work, is counted
-        and given up on after SOURCE_MAX_ATTEMPTS runs (see `fetch_details`)."""
+        long stream whose `-J` times out) must not block the others, so it is counted for that video
+        (the playlist listing already worked this run). Two different videos failing this way in one
+        run means yt-dlp itself is down: the source stops and this run's counts are taken back, so an
+        outage never costs a video its place. A video that is the only such failure run after run is
+        given up on after SOURCE_MAX_ATTEMPTS runs (see `fetch_details`)."""
         self._source_failed.add(item.id)
         if len(self._source_failed) >= 2:
             self._halted = message
-            self._pending_source.clear()
-        elif self._ytdlp_worked:
-            self._bump(ctx, SOURCE_FAILURES_FILE, item.id)
-        else:  # not counted until something shows that yt-dlp works at all
-            self._pending_source.add(item.id)
+            self._uncount(ctx)
+        elif self._bump(ctx, SOURCE_FAILURES_FILE, item.id) is not None:
+            self._counted.add(item.id)
 
-    def _yt_dlp_works(self, ctx: AdapterContext) -> None:
-        """A per-video call succeeded: failures held back so far were that video's alone."""
-        self._ytdlp_worked = True
-        for item_id in sorted(self._pending_source):
-            self._bump(ctx, SOURCE_FAILURES_FILE, item_id)
-        self._pending_source.clear()
+    def _uncount(self, ctx: AdapterContext) -> None:
+        """Take back the source-level counts added in this run."""
+        path = self._state_file(ctx, SOURCE_FAILURES_FILE)
+        counts = self._load_map(path)
+        for item_id in self._counted:
+            if isinstance(counts.get(item_id), int):
+                counts[item_id] -= 1
+                if counts[item_id] <= 0:
+                    del counts[item_id]
+        self._counted.clear()
+        if path is not None:
+            try:
+                atomic_write_json(path, counts)
+            except OSError as exc:
+                log.warning("youtube: cannot take back this run's failure counts: %s", exc)
+
+    def _clear_source_count(self, ctx: AdapterContext, item_id: str) -> None:
+        """"Consecutive" runs: once a video fails some other way, or yt-dlp answers for it, its
+        source-level count starts again."""
+        path = self._state_file(ctx, SOURCE_FAILURES_FILE)
+        counts = self._load_map(path)
+        if path is not None and counts.pop(item_id, None) is not None:
+            try:
+                atomic_write_json(path, counts)
+            except OSError as exc:
+                log.warning("youtube: cannot reset the failure count for %s: %s", item_id, exc)
 
     def _record_failure(self, item: Item, exc: YtDlpError, ctx: AdapterContext) -> None:
         """Handle a yt-dlp failure for one video. Source-level errors are counted per video, not as
@@ -389,6 +408,7 @@ class YouTubeAdapter(SourceAdapter):
         if SOURCE_LEVEL_ERRORS.search(message):
             self._source_level_failure(item, message, ctx)
             return
+        self._clear_source_count(ctx, item.id)
         if UPCOMING.search(message) and self._within_wait(item, ctx):
             raise ItemDeferred(f"{item.id}: not out yet, will look again next run: {message}") from exc
         if PERMANENT_ERRORS.search(message):
@@ -447,7 +467,7 @@ class YouTubeAdapter(SourceAdapter):
     def _fetch(self, item: Item, ctx: AdapterContext) -> Item:
         client = self._yt(ctx)
         info = client.info(item.url)
-        self._yt_dlp_works(ctx)
+        self._clear_source_count(ctx, item.id)
         item.title = str(info.get("title") or item.title)
         item.author = str(info.get("channel") or info.get("uploader") or item.author)
         item.published = _iso_date(info.get("upload_date"))

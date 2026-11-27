@@ -55,22 +55,31 @@ def test_a_single_video_that_always_times_out_does_not_stop_the_others(env):
     assert infos(client) == ["stream", "good"]
 
 
-def test_a_video_that_is_the_only_source_level_failure_for_three_runs_is_given_up_on(env):
+def test_a_video_that_is_the_only_source_level_failure_for_five_runs_is_given_up_on(env):
     e = env()
     statuses = []
-    for n in range(3):  # each run brings a new good video, proving yt-dlp works
+    for n in range(5):
         client = FakeYtDlp(["stream", f"g{n}"], fail_info={"stream"}, fail_message=TIMEOUT,
                            subs={f"g{n}": GOOD})
         statuses.append(e.go(client).sources["youtube"]["status"])
         assert "stream" not in processed(e)
-    assert statuses == ["failed"] * 3
-    assert state(e, "youtube-source-failures.json") == {"stream": 3}
-    client = FakeYtDlp(["stream", "g3"], fail_info={"stream"}, fail_message=TIMEOUT, subs={"g3": GOOD})
+    assert statuses == ["failed"] * 5
+    assert state(e, "youtube-source-failures.json") == {"stream": 5}
+    client = FakeYtDlp(["stream", "g5"], fail_info={"stream"}, fail_message=TIMEOUT, subs={"g5": GOOD})
     res = e.go(client)
     assert res.sources["youtube"]["status"] == "ok"
-    assert "stream" in processed(e) and infos(client) == ["g3"]  # not retried
+    assert "stream" in processed(e) and infos(client) == ["g5"]  # not retried
     assert "stream" not in state(e, "youtube-source-failures.json")  # and its counter is pruned
     assert all("stream" not in p.name for p in e.notes())
+
+
+def test_a_lone_failing_video_is_given_up_on_even_when_nothing_else_is_new(env):
+    e = env()  # one new video a day, and it is a stream whose -J call always times out
+    for _ in range(5):
+        assert e.go(FakeYtDlp(["stream"], fail_info={"stream"}, fail_message=TIMEOUT)).sources["youtube"]["status"] == "failed"
+    client = FakeYtDlp(["stream"], fail_info={"stream"}, fail_message=TIMEOUT)
+    assert e.go(client).sources["youtube"]["status"] == "ok"
+    assert "stream" in processed(e) and infos(client) == []
 
 
 def test_a_run_that_halts_does_not_count_against_either_video(env):
@@ -81,11 +90,33 @@ def test_a_run_that_halts_does_not_count_against_either_video(env):
     assert state(e, "youtube-source-failures.json") == {"stream": 1}
 
 
-def test_a_lone_failure_with_no_other_video_working_is_not_counted(env):
+def test_an_outage_that_starts_mid_run_never_costs_a_video_its_place(env):
+    e = env()  # every run: a new good video, then two videos that time out because yt-dlp got throttled
+    for n in range(8):
+        client = FakeYtDlp([f"g{n}", "victim", "w"], fail_info={"victim", "w"}, fail_message=TIMEOUT,
+                           subs={f"g{n}": GOOD})
+        assert e.go(client).sources["youtube"]["status"] == "failed"
+        assert state(e, "youtube-source-failures.json") == {}
+    assert "victim" not in processed(e) and "w" not in processed(e)
+
+
+def test_a_changed_failure_resets_the_source_level_count(env):
     e = env()
-    for _ in range(5):  # nothing else new: it could just be yt-dlp that is down
-        assert e.go(FakeYtDlp(["stream"], fail_info={"stream"}, fail_message=TIMEOUT)).sources["youtube"]["status"] == "failed"
-    assert state(e, "youtube-source-failures.json") == {} and "stream" not in processed(e)
+    e.go(FakeYtDlp(["v"], fail_info={"v"}, fail_message=TIMEOUT))
+    assert state(e, "youtube-source-failures.json") == {"v": 1}
+    e.go(FakeYtDlp(["v"], fail_info={"v"}, fail_message="ERROR: [youtube] v: Unable to extract initial data"))
+    assert state(e, "youtube-source-failures.json") == {} and state(e, "youtube-attempts.json") == {"v": 1}
+    e.go(FakeYtDlp(["v"], fail_info={"v"}, fail_message=TIMEOUT))  # a call that works resets it too
+    e.go(FakeYtDlp(["v"], upload_date="20260115"), date="2026-01-15")  # info works, captions pending
+    assert state(e, "youtube-source-failures.json") == {}
+
+
+def test_an_empty_listing_does_not_wipe_the_failure_counts(env):
+    e = env()
+    odd = "ERROR: [youtube] bad: Unable to extract initial data"
+    e.go(FakeYtDlp(["bad"], fail_info={"bad"}, fail_message=odd))
+    e.go(FakeYtDlp([]))  # a transient empty listing
+    assert state(e, "youtube-attempts.json") == {"bad": 1}
 
 
 # --- premieres and upcoming/live videos are deferrals ---
