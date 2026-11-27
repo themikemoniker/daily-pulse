@@ -13,6 +13,10 @@ class AdapterContext:
     config: dict = field(default_factory=dict)  # this source's [sources.<name>] table
     fixtures_dir: Path | None = None  # set by --fixtures; adapters read recorded inputs from it
     date: str = ""  # run date, YYYY-MM-DD
+    data_dir: Path | None = None  # local-only data (transcripts); never published
+    notes_dir: Path | None = None  # where per-item notes are written (<out>/notes); None: write none
+    summarizer: object | None = None  # a daily_pulse.summarizer.Summarizer shared by the whole run
+    dry_run: bool = False  # write nothing to disk and make no `claude` calls
 
 
 class SourceAdapter(ABC):
