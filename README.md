@@ -8,7 +8,7 @@ A daily trends digest. Under construction; see the spec issue.
 
 - Config lives in `config/daily-pulse.toml` (sources, account lists, first-run cap, `data_dir`).
 - Local state, logs and the run lock live under `data_dir` (default `data/`, gitignored): processed IDs, per-module failure counters (`state/`), run logs (`logs/`), `run.lock`.
-- Each source adapter runs in isolation. An exception is logged with its traceback and counted; a module with 2 consecutive failures appears in `flagged` in `<out>/run-<date>.json`.
+- Each source adapter runs in isolation. An exception is logged with its traceback and counted; a module with 2 consecutive failures appears in `flagged` in `<out>/run-<date>.json`. A same-date rerun keeps the earlier file as `run-<date>.<n>.json`.
 - A source's first run processes only its newest `first_run_cap` items; the older backlog is marked seen and never processed.
 - A second run started while one is in progress prints a message and exits 0 without touching state.
 - `--dry-run` runs the adapters and prints the result, writing no state, logs, lock or output.
