@@ -392,5 +392,8 @@ def test_a_creator_added_with_watch_add_reaches_the_digest_and_removing_it_stops
     assert main(["watch", "list", "--config", str(pipeline.cfg)]) == 0
     assert "@demochannel" in capsys.readouterr().out
     assert main(["watch", "remove", channel, "--config", str(pipeline.cfg)]) == 0
-    from daily_pulse.config import load_config
-    assert "channels" not in load_config(pipeline.cfg).sources["youtube"] or not load_config(pipeline.cfg).sources["youtube"]["channels"]
+    (yt / "channels.json").write_text(json.dumps({channel: [
+        {"id": "chanvid2", "title": "A later video", "channel": "Demo", "duration": 900}]}))
+    pipeline.go()  # the channel is no longer watched, so its newer video is not listed or noted
+    notes = {p.name for p in (pipeline.out / "notes" / DATE).glob("*.md")}
+    assert "youtube-chanvid2.md" not in notes

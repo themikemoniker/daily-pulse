@@ -245,7 +245,7 @@ class FixtureYtDlp:
         try:
             recorded = json.loads((self.dir / "channels.json").read_text(encoding="utf-8"))
             return list(recorded[url.removesuffix("/videos")])[:limit]
-        except (OSError, KeyError, ValueError) as exc:
+        except (OSError, KeyError, ValueError, TypeError) as exc:
             raise YtDlpError(f"no recorded channel listing for {url}: {exc}") from None
 
     def info(self, url: str) -> dict:
@@ -336,7 +336,9 @@ class YouTubeAdapter(SourceAdapter):
     @staticmethod
     def _channels(ctx: AdapterContext) -> list[str]:
         value = ctx.config.get("channels") or []
-        return [c.strip() for c in value if isinstance(c, str) and c.strip()] if isinstance(value, list) else []
+        if not isinstance(value, list) or not all(isinstance(c, str) for c in value):
+            raise ValueError(f"sources.youtube.channels must be a list of strings, got {value!r}")
+        return [c.strip() for c in value if c.strip()]
 
     @staticmethod
     def _channel_limit(ctx: AdapterContext) -> int:
@@ -351,12 +353,15 @@ class YouTubeAdapter(SourceAdapter):
         limit, lists = self._channel_limit(ctx), []
         for url in self._channels(ctx):
             try:
-                entries = client.channel_videos(url.rstrip("/") + "/videos", limit)
+                entries = client.channel_videos(url.rstrip("/").removesuffix("/videos") + "/videos", limit)
             except YtDlpRateLimited as exc:
                 log.warning("youtube: rate limited while listing channels, the rest wait for a later run: %s", exc)
+                self._halted = f"rate limited while listing channels: {exc}"  # no per-video yt-dlp calls this run
+                self._channels_complete = False
                 break
             except Exception as exc:  # noqa: BLE001 - one bad channel must not end the source
                 log.warning("youtube: cannot list channel %s: %s", url, exc)
+                self._channels_complete = False
                 continue
             lists.append([self._listed(e) for e in entries
                           if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
@@ -371,14 +376,23 @@ class YouTubeAdapter(SourceAdapter):
         entries. Private and deleted placeholders are left out. Duration and view count from the
         listing go to the quality gate, which runs before any per-video call."""
         self._halted, self._ytdlp_worked = None, False
+        self._channels_complete = True  # False when a channel could not be listed: its state must not be pruned
         self._source_failed, self._counted, self._pending_source = set(), set(), set()
         order = str(ctx.config.get("playlist_order") or "").strip()
         if order not in ("", "newest_first", "oldest_first"):
             raise ValueError(f"playlist_order must be newest_first or oldest_first, got {order!r}")
         client, url = self._yt(ctx), str(ctx.config.get("playlist_url") or "").strip()
         items: list[Item] = []
+        channels_wanted = bool(self._channels(ctx))
+        entries, playlist_ok = [], True
         if url:
-            entries = client.playlist(url)
+            try:
+                entries = client.playlist(url)
+            except YtDlpError as exc:
+                if not channels_wanted:
+                    raise  # nothing else to list: the source fails as before
+                log.warning("youtube: cannot list the playlist, the channels still run: %s", exc)
+                playlist_ok = False
             items = [self._listed(e) for e in entries
                      if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
                      and str(e.get("title") or "").strip().lower() not in UNAVAILABLE_TITLES]
@@ -389,7 +403,9 @@ class YouTubeAdapter(SourceAdapter):
                 items = sorted(items, key=lambda i: i.published, reverse=True)
         channels = self._channel_items(client, ctx)
         merged = self._interleave([items, *channels]) if channels else items
-        if merged:  # an empty listing is more likely a hiccup than a playlist with nothing left
+        if merged and self._channels_complete and playlist_ok:
+            # an empty listing is more likely a hiccup than a playlist with nothing left; and when a
+            # list could not be read, the state of its videos must survive until it can
             self._prune_state(ctx, {i.id for i in merged})
         return merged
 

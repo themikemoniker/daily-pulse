@@ -82,3 +82,43 @@ def test_private_placeholders_are_left_out_of_channel_listings():
 def test_playlist_only_behaviour_is_unchanged():
     c = Client(playlist=[e("p0", upload_date="20260102"), e("p1", upload_date="20260105")])
     assert ids(c, playlist_url="https://x/p") == ["p1", "p0"]  # dated entries sort newest first
+
+
+def test_channels_must_be_a_list_of_strings():
+    for bad in ("https://www.youtube.com/@x", [1], {"a": 1}):
+        with pytest.raises(ValueError, match="channels must be a list"):
+            ids(Client(), channels=bad)
+
+
+def test_a_trailing_videos_segment_is_not_doubled():
+    c = Client(channels={CH_A: [e("a0")]})
+    assert ids(c, channels=[CH_A + "/videos"]) == ["a0"]
+    assert c.asked == [(CH_A + "/videos", 5)]
+
+
+def test_a_failing_playlist_does_not_stop_the_channels_but_alone_it_still_fails():
+    class Broken(Client):
+        def playlist(self, url):
+            raise YtDlpError("playlist down")
+    assert ids(Broken(channels={CH_A: [e("a0")]}), playlist_url="https://x/p", channels=[CH_A]) == ["a0"]
+    with pytest.raises(YtDlpError, match="playlist down"):
+        ids(Broken(), playlist_url="https://x/p")
+
+
+def test_a_failed_channel_keeps_its_per_video_state(tmp_path):
+    import json
+    state = tmp_path / "state"
+    state.mkdir()
+    attempts = state / "youtube-attempts.json"
+    attempts.write_text(json.dumps({"a0": 1, "gone": 1}))
+    ctx = AdapterContext(config={"playlist_url": "https://x/p", "channels": [CH_A]}, data_dir=tmp_path, persist=True)
+    YouTubeAdapter(client=Client(playlist=[e("p0")], channels={CH_A: YtDlpError("boom")})).list_new(ctx)
+    assert json.loads(attempts.read_text()) == {"a0": 1, "gone": 1}  # nothing pruned while a list is unreadable
+    YouTubeAdapter(client=Client(playlist=[e("p0")], channels={CH_A: [e("a0")]})).list_new(ctx)
+    assert json.loads(attempts.read_text()) == {"a0": 1}  # all lists read: the video that left is pruned
+
+
+def test_a_rate_limited_channel_listing_halts_per_video_yt_dlp_calls():
+    a = YouTubeAdapter(client=Client(channels={CH_A: YtDlpRateLimited("429")}))
+    a.list_new(AdapterContext(config={"channels": [CH_A]}, persist=False))
+    assert a._halted and "rate limited" in a._halted
