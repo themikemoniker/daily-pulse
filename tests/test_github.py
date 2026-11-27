@@ -402,3 +402,118 @@ def test_total_outage_reports_the_source_failed(make_env, fixtures_dir, kind):
     assert code == 0
     assert res["sources"]["github"]["status"] == "failed"
     assert kind in res["sources"]["github"]["error"]
+
+
+# -- borrowing the operator's gh login ---------------------------------------------------------
+import os
+import stat
+
+
+def fake_gh(tmp_path, body):
+    gh = tmp_path / "gh"
+    gh.write_text(body)
+    gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+    return str(gh)
+
+
+GH_OK = "#!/bin/sh\n[ \"$1 $2\" = \"auth token\" ] && echo gho_borrowed\n"
+
+
+def auth_headers(seen):
+    return [r.get_header("Authorization") for r in seen]
+
+
+def test_gh_login_is_off_by_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    seen = capture_urlopen(monkeypatch, FakeResponse([]))
+    UrllibTransport(gh_cmd=fake_gh(tmp_path, GH_OK))("/x", {})
+    assert auth_headers(seen) == [None]
+
+
+def test_a_borrowed_login_is_asked_once_used_as_bearer_and_never_exported(monkeypatch, tmp_path):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    seen = capture_urlopen(monkeypatch, FakeResponse([]))
+    t = UrllibTransport(gh_login=True, gh_cmd=fake_gh(tmp_path, GH_OK))
+    t("/a", {}), t("/b", {})
+    assert auth_headers(seen) == ["Bearer gho_borrowed"] * 2
+    assert "GITHUB_TOKEN" not in os.environ  # no child process can inherit it
+    assert "gho_borrowed" not in repr(t)
+
+
+def test_an_environment_token_wins_over_the_gh_login(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "mine")
+    seen = capture_urlopen(monkeypatch, FakeResponse([]))
+    UrllibTransport(gh_login=True, gh_cmd=fake_gh(tmp_path, GH_OK))("/x", {})
+    assert auth_headers(seen) == ["Bearer mine"]
+
+
+@pytest.mark.parametrize("body", ["#!/bin/sh\nexit 1\n", "#!/bin/sh\n", "#!/bin/sh\nexec sleep 5\n"])
+def test_a_failing_empty_or_slow_gh_leaves_the_run_unauthenticated(monkeypatch, tmp_path, body, caplog):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    seen = capture_urlopen(monkeypatch, FakeResponse([]))
+    monkeypatch.setattr(UrllibTransport, "GH_TIMEOUT", 1)
+    t = UrllibTransport(gh_login=True, gh_cmd=fake_gh(tmp_path, body))
+    with caplog.at_level("INFO"):
+        t("/x", {}), t("/y", {})
+    assert auth_headers(seen) == [None, None]
+    assert "running unauthenticated" in caplog.text
+
+
+def test_a_rejected_token_is_dropped_and_the_request_retried_without_it(monkeypatch, tmp_path, caplog):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    replies = [urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b'{"message": "Bad credentials"}')),
+               FakeResponse([{"ok": 1}]), FakeResponse([{"ok": 2}])]
+    seen = []
+
+    def fake(req, timeout=None):
+        seen.append(req)
+        r = replies.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    t = UrllibTransport(gh_login=True, gh_cmd=fake_gh(tmp_path, GH_OK))
+    with caplog.at_level("WARNING"):
+        status, _, body = t("/x", {})
+        t("/y", {})
+    assert (status, body) == (200, [{"ok": 1}])
+    assert auth_headers(seen) == ["Bearer gho_borrowed", None, None]  # dropped for the rest of the run
+    assert "rejected (401)" in caplog.text and "gho_borrowed" not in caplog.text
+
+
+def test_a_rejected_environment_token_stays_a_401_error_not_a_silent_fallback(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "stale")
+    seen = capture_urlopen(monkeypatch, urllib.error.HTTPError("u", 401, "Unauthorized", {},
+                                                                io.BytesIO(b'{"message": "Bad credentials"}')))
+    status, _, body = UrllibTransport()("/x", {})
+    assert status == 401 and body["message"] == "Bad credentials"
+    assert auth_headers(seen) == ["Bearer stale"]  # asked once, with the operator's token, no retry
+
+
+def test_the_token_is_not_replayed_to_another_host_on_a_redirect():
+    from daily_pulse.adapters.github import _KeepAuthOnHost
+    req = urllib.request.Request("https://api.github.com/x", headers={"Authorization": "Bearer t"})
+    handler = _KeepAuthOnHost()
+    away = handler.redirect_request(req, None, 302, "Found", {}, "https://evil.example/y")
+    same = handler.redirect_request(req, None, 302, "Found", {}, "https://api.github.com/z")
+    assert not away.has_header("Authorization") and same.get_header("Authorization") == "Bearer t"
+
+
+def test_the_newest_gh_install_is_found_by_version_not_by_name(monkeypatch, tmp_path):
+    from daily_pulse.adapters import github as gh_mod
+    for v in ("2.9.0", "2.10.0"):
+        d = tmp_path / ".local" / "opt" / f"gh-{v}" / "bin"
+        d.mkdir(parents=True)
+        (d / "gh").write_text("#!/bin/sh\n")
+        (d / "gh").chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(gh_mod.shutil, "which", lambda name: None)
+    assert gh_mod._gh_executable().endswith("gh-2.10.0/bin/gh")
+
+
+def test_use_gh_login_must_be_a_boolean_even_under_fixtures(monkeypatch):
+    from daily_pulse.adapters.base import AdapterContext
+    with pytest.raises(ValueError, match="use_gh_login"):
+        GitHubAdapter(transport=lambda p, q: (200, {}, [])).list_new(
+            AdapterContext(config={"use_gh_login": "yes"}))

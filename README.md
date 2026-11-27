@@ -21,7 +21,7 @@ yet, so they do not reach the digest or the site. **X** is deferred (see [Deferr
    `[sources.instagram] kinds`. Each source has `enabled`. Adding an account is a one-line edit. Other tables:
    `[run]` (`first_run_cap`, `alert_after_failures`), `[paths] data_dir`, `[site] base_url`, `[summarizer]`
    (`claude_cmd`, `max_calls`) and `[quality]` (see [Quality gate](#quality-gate)).
-3. **Environment** (never in the config or the repo): `GITHUB_TOKEN` (optional, higher GitHub rate limits),
+3. **Environment** (never in the config or the repo): `GITHUB_TOKEN` (optional, higher GitHub rate limits; with no token set the shipped config borrows your `gh` login, see the GitHub section, and `use_gh_login = false` turns that off),
    `IG_CLI_CMD` (the Instagram command), `DAILY_PULSE_CLAUDE` (overrides `claude_cmd`), `DAILY_PULSE_YTDLP`.
 4. `claude` must be on the PATH of whatever runs the pipeline; it uses your Claude subscription, no API key.
 
@@ -165,7 +165,7 @@ Weak and off-topic items are weeded out cheaply, before a full `claude -p` summa
 
 ## GitHub source
 
-`daily_pulse/adapters/github.py` uses the GitHub REST API (stdlib `urllib`), unauthenticated unless the `GITHUB_TOKEN` environment variable is set (read per request, sent only as a bearer header, never logged or stored).
+`daily_pulse/adapters/github.py` uses the GitHub REST API (stdlib `urllib`), unauthenticated unless the `GITHUB_TOKEN` environment variable is set or, with `[sources.github] use_gh_login = true` (the shipped config), the operator's `gh auth token` supplies one. A gh login is a broad credential, so the token is asked for once, held in memory only (never exported, so no child process such as `claude` or yt-dlp inherits it), and dropped for the run if GitHub answers 401. Without `gh`, or without a login, the run is unauthenticated, and the log says which. The token is sent only as a bearer header and is never logged or stored.
 
 - **Rising**: repos created in the last `rising_days` (default 7), top 10 by stars. Metrics carry `stars`, `age_days` and `star_velocity` (stars / age in days, age floored at one day). Id `rising:<owner/repo>`.
 - **Watched accounts** (`watch_accounts`): new repos (`repo:`), releases in the last `lookback_days` (`release:<repo>:<tag>`), the newest tag when a recently pushed repo has no release (`tag:`), a push on the run day when nothing else explains it (`push:<repo>:<date>`), and a star gain of at least `star_delta` (default 50) since the previous run (`stars:<repo>:<date>`). The star baseline lives in `data/state/github.json`; it is not written on `--dry-run`. Forks are ignored.
