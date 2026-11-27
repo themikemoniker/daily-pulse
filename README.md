@@ -78,6 +78,17 @@ for the cron line. A dry run against recorded inputs:
 - Full transcripts and captions are written only by `write_transcript(data_dir, item, text)` to `<data_dir>/transcripts/`, never to `notes/`. Title, author and tags are guarded too, and matching ignores case, curly apostrophes, markdown underscores, zero-width characters and caption markup.
 - `daily_pulse.quoteguard` enforces the limits: a run of more than 40 consecutive words matching the local transcript/caption (or the item's excerpt) is cut to a 20-word snippet, and all quoted words in a note (the `quotes` list, shown as blockquotes, plus quoted spans and any lifted run of 8+ words in free text) share a budget of 49.
 
+## Rating and notes
+
+Every item from every enabled source ends a run in exactly one of three states: **rated and noted**, **deliberately dropped** (quality-gate rule or triage; logged and listed under the source's `dropped`), or **left unprocessed** to be retried next run. An item is marked processed only after its note is on disk or when it is dropped (or, on a source's first run, when it is older backlog beyond `first_run_cap`, which is logged as marked seen).
+
+- Who rates: YouTube rates inside its adapter (it needs captions). GitHub and Instagram set `rated_by_runner = True` on the adapter, and the runner does it once for both: after `fetch_details` it sends the item through the run's one `Summarizer` and writes the note with `write_note`. A new source gets the same behavior by setting that flag; an adapter may override `rating_text(item, ctx)` to give the rater extra text that is never stored.
+- **GitHub** items (rising and new repos, releases, tags, pushes, star gains) are rated from their own metadata: repo description and topics, stars, `age_days` and `star_velocity`, the release name and a body excerpt. Early, fast-growing repos can therefore be diamonds; a repo rated 9+ and under 48 hours old appears in "Diamonds in the rough".
+- **Instagram** reels are rated from the full caption (kept in memory by the adapter, never written anywhere) plus metadata, saved before liked. With no `IG_CLI_CMD` the source stays deferred and nothing changes. The quality gate's rules and triage apply as before. **X** stays deferred.
+- The notes are own-words summaries; the quote guard checks them against the caption or the item's excerpt, so a README or caption is never pasted into a note.
+- A rating that fails (a `claude` outage, a malformed reply twice, a note the writer refuses) leaves the item unprocessed and counts as a failure for its source, like a YouTube video; the next run tries again. Items rated past the `[summarizer] max_calls` cap (shared by all sources, retries included) are not a fault: they wait for the next run without counting against the source.
+- `--dry-run` rates nothing and writes nothing.
+
 ## Daily digest
 
 `daily-pulse digest --out <dir> [--date YYYY-MM-DD] [--base-url URL]` builds `<dir>/digests/<date>.md` and

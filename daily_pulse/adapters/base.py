@@ -33,11 +33,18 @@ class SourceAdapter(ABC):
     name: str
     quality_gate = False  # True: the runner screens new items (rules, triage) before fetch_details
     quality_duration = False  # True: the gate's min/max duration rules apply to this source's items
+    rated_by_runner = False  # True: the runner rates each fetched item and writes its note (see runner.py).
+    # False: the adapter does it inside `fetch_details` (YouTube), or the source yields no notes.
 
     def status(self, ctx: AdapterContext) -> str | None:
         """None when ready to run. Otherwise a status string such as
         "deferred: <reason>" or "not configured"; the runner records it and skips the adapter."""
         return None
+
+    def rating_text(self, item: Item, ctx: AdapterContext) -> str:
+        """Extra source text the rater may read for `item` (a caption, say) beyond the item's own
+        fields. Used only for rating and the quote guard; it is never stored. Default: none."""
+        return ""
 
     @abstractmethod
     def list_new(self, ctx: AdapterContext) -> list[Item]:

@@ -16,6 +16,12 @@ watch_repos = ["bob/tool"]
 
 
 @pytest.fixture(autouse=True)
+def rater(fake_rater):
+    """These tests are about listing; the runner also rates each item, so it needs a rater."""
+    return fake_rater()
+
+
+@pytest.fixture(autouse=True)
 def register_github():
     registry.register(GitHubAdapter())
 

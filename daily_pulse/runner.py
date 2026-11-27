@@ -12,7 +12,7 @@ from daily_pulse.adapters.base import AdapterContext, ItemDeferred, ItemSkipped
 from daily_pulse.config import Config
 from daily_pulse.quality import QualityGate, Triager, append_triage_log, decision_records
 from daily_pulse.state import FailureCounters, StateError, StateStore, serialize_json
-from daily_pulse.summarizer import Summarizer
+from daily_pulse.summarizer import Summarizer, summarize_items
 
 log = logging.getLogger("daily_pulse")
 
@@ -36,6 +36,15 @@ class RunResult:
         return out
 
 
+def _mark_backlog(name, state, ids: list[str], cap: int | None) -> None:
+    """First run: the older items beyond `first_run_cap` are marked seen, with no note. Logged, so
+    no item is ever consumed silently."""
+    if ids:
+        log.info("%s: first run, %d older item(s) beyond the cap of %s marked seen without notes: %s",
+                 name, len(ids), cap, ", ".join(ids))
+    state.mark_processed(name, *ids)
+
+
 def _screen(name, adapter, ctx, state, gate, new, limit, dropped: list) -> list:
     """Run the quality gate over the new items and return the ones to process. Dropped items are
     logged locally, recorded in `dropped` and marked processed (so they are never looked at again,
@@ -47,7 +56,7 @@ def _screen(name, adapter, ctx, state, gate, new, limit, dropped: list) -> list:
     except Exception:  # noqa: BLE001 - fail open
         log.error("%s: quality gate failed, items continue unscreened\n%s", name, traceback.format_exc())
         if limit is not None:
-            state.mark_processed(name, *(i.id for i in new[limit:]))
+            _mark_backlog(name, state, [i.id for i in new[limit:]], limit)
         return new if limit is None else new[:limit]
     if ctx.persist and ctx.data_dir is not None:
         try:
@@ -58,8 +67,31 @@ def _screen(name, adapter, ctx, state, gate, new, limit, dropped: list) -> list:
     for d in screened.dropped:
         log.info("%s: %s dropped (%s): %s", name, d.item_id, "triage" if d.score is not None else "rule", d.reason)
         dropped.append({"id": d.item_id, "title": titles.get(d.item_id, ""), "score": d.score, "reason": d.reason})
-    state.mark_processed(name, *(d.item_id for d in screened.dropped), *(i.id for i in screened.remaining))
+    state.mark_processed(name, *(d.item_id for d in screened.dropped))
+    _mark_backlog(name, state, [i.id for i in screened.remaining], limit)
     return screened.kept
+
+
+class RatingFailed(Exception):
+    """An item could not be rated or noted; it stays unprocessed and is retried next run."""
+
+
+def _rate_and_note(name, adapter, item, ctx) -> None:
+    """Rate `item` against the rubric and write its note, for sources whose adapter leaves that to
+    the runner (`rated_by_runner`). Returns only once the note is on disk, so the caller may then
+    mark the item processed. Raises ItemDeferred when the per-run call cap is spent (not a fault:
+    the item waits for the next run) and RatingFailed when no valid rating or note came out."""
+    summarizer = ctx.summarizer
+    if summarizer is None or ctx.notes_dir is None:  # never consume an item without a note
+        raise RatingFailed(f"{item.id}: no summarizer or notes directory in the run context")
+    if summarizer.calls_made >= summarizer.max_calls:
+        raise ItemDeferred(f"{item.id}: claude call cap of {summarizer.max_calls} reached, not rated yet")
+    text = adapter.rating_text(item, ctx)
+    result = summarize_items(summarizer, [item], ctx.notes_dir, ctx.date, {item.id: text})[0]
+    if result.status != "rated":
+        if summarizer.calls_made >= summarizer.max_calls:  # the cap, not the item, stopped the retry
+            raise ItemDeferred(f"{item.id}: claude call cap of {summarizer.max_calls} reached, not rated yet")
+        raise RatingFailed(f"{item.id}: no rating, will retry next run")
 
 
 def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list, gate=None, dropped=None) -> Exception | None:
@@ -84,7 +116,7 @@ def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list, gate=Non
     elif first_run:
         # Don't chew through a backlog: keep the newest few, and mark the rest as seen
         # (in one write) so later runs only handle genuinely new items.
-        state.mark_processed(name, *(c.id for c in new[first_run_cap:]))
+        _mark_backlog(name, state, [c.id for c in new[first_run_cap:]], first_run_cap)
         new = new[:first_run_cap]
     error = None
     for candidate in new:
@@ -93,6 +125,8 @@ def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list, gate=Non
             # Prove the item can be reported *before* it is marked processed, so a bad
             # item is retried next run instead of being consumed and lost.
             serialize_json(item.to_dict())
+            if adapter.rated_by_runner and ctx.persist:
+                _rate_and_note(name, adapter, item, ctx)
         except ItemDeferred as deferred:
             log.info("%s: item %s deferred to the next run: %s", name, candidate.id, deferred)
             continue

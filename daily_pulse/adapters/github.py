@@ -81,6 +81,7 @@ def _excerpt(text) -> str:
 
 class GitHubAdapter(SourceAdapter):
     name = "github"
+    rated_by_runner = True  # rated from the repo/release metadata the items already carry
 
     def __init__(self, transport=None, sleep=time.sleep, clock=time.time):
         self._transport = transport  # callable(path, params) -> (status, headers, body)

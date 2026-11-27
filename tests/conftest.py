@@ -18,6 +18,12 @@ def isolated_registry(monkeypatch):
     monkeypatch.setattr(registry, "_ADAPTERS", {})
 
 
+@pytest.fixture(autouse=True)
+def no_real_claude(monkeypatch):
+    """Tests never run the real `claude`: unless a test installs a fake, the binary does not exist."""
+    monkeypatch.setenv("DAILY_PULSE_CLAUDE", "/nonexistent/claude-not-for-tests")
+
+
 class FakeAdapter(SourceAdapter):
     """Reads items from <fixtures>/<name>/items.json. No network, no subprocess."""
 
@@ -116,5 +122,34 @@ class FakeClaude:
 def fake_claude(tmp_path):
     def _make(*responses):
         return FakeClaude(tmp_path / "fake-claude-dir", list(responses))
+
+    return _make
+
+
+def rating_reply(rating=8, **over) -> str:
+    """A valid reply from the rater (one JSON object); `over` replaces any field."""
+    base = {
+        "summary": "A short own-words summary of the item.",
+        "takeaways": [], "beats": [],
+        "rating": rating,
+        "reason": "Relevant to agent loops.",
+        "verdict": "watch",
+        "tags": ["agents"],
+        "diamond": False,
+        "diamond_reason": "",
+    }
+    base.update(over)
+    return json.dumps(base)
+
+
+@pytest.fixture
+def fake_rater(tmp_path, monkeypatch):
+    """Every `claude -p` call during the test is answered with a valid rating (the last reply
+    repeats). Pass other replies to change that: `fake_rater(rating_reply(9), "not json")`."""
+
+    def _make(*responses):
+        claude = FakeClaude(tmp_path / "fake-rater-dir", list(responses) or [rating_reply()])
+        monkeypatch.setenv("DAILY_PULSE_CLAUDE", str(claude.path))
+        return claude
 
     return _make
