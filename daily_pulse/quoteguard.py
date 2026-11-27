@@ -26,7 +26,10 @@ _APOS = "'’‘ʼ`"
 # Scripts written without spaces (kana, CJK, Bopomofo, Thai) count one character per word, so the
 # word limits still bite.
 _UNSPACED = "\u0e00-\u0e7f\u3040-\u30ff\u3100-\u312f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
-_WORD = re.compile(rf"[{_UNSPACED}]|[^\W_{_UNSPACED}]+(?:[{_APOS}][^\W_{_UNSPACED}]+)*")
+_ZW = "\u200b-\u200f\u2060\ufeff\u00ad"  # zero-width characters, ignored when comparing
+_MARKS = "\u0300-\u036f"  # combining accents, part of the word they sit on
+_LETTER = rf"(?:[^\W_{_UNSPACED}]|[{_MARKS}{_ZW}])"
+_WORD = re.compile(rf"[{_UNSPACED}]|{_LETTER}+(?:[{_APOS}]{_LETTER}+)*")
 # Timestamps are skipped on both sides, so [00:10] markers inserted into a copy do not break it.
 _TIMESTAMP = re.compile(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\]?")
 # Caption markup is skipped in the reference only (never in the text under test, where a
@@ -38,26 +41,33 @@ ELLIPSIS = "…"
 _SEP = "\x00"  # joins fields so a copy spanning adjacent fields is seen as one run
 
 
-def _clean(text: str) -> str:
-    return _ZERO_WIDTH.sub("", unicodedata.normalize("NFKC", text))
+def _norm(word: str) -> str:
+    """The form a word is compared in: NFKC, no zero-width characters, lower case, plain apostrophe."""
+    word = _ZERO_WIDTH.sub("", unicodedata.normalize("NFKC", word)).lower()
+    return re.sub(f"[{_APOS}]", "'", word)
+
+
+def _words(text: str) -> list[tuple[int, int, str]]:
+    """(start, end, normalised word) for each word of `text`, offsets into the original string.
+    Normalising per word means text is only ever compared in normalised form, never rewritten."""
+    found = ((m.start(), m.end(), _norm(m.group())) for m in _WORD.finditer(text))
+    return [w for w in found if w[2]]
 
 
 def _tokens(text: str, reference: bool = False) -> list[tuple[int, int, str]]:
-    """(start, end, normalised word) for each word of cleaned `text`, skipping timestamps
-    (and, for a reference, caption markup)."""
+    """The words of `text` minus timestamps (and, for a reference, caption markup)."""
     skip = [m.span() for m in (_REF_MARKUP if reference else _TIMESTAMP).finditer(text)]
     out, k = [], 0
-    for m in _WORD.finditer(text):
-        while k < len(skip) and skip[k][1] <= m.start():
+    for w in _words(text):
+        while k < len(skip) and skip[k][1] <= w[0]:
             k += 1
-        if k < len(skip) and skip[k][0] <= m.start() < skip[k][1]:
-            continue
-        out.append((m.start(), m.end(), re.sub(f"[{_APOS}]", "'", m.group().lower())))
+        if not (k < len(skip) and skip[k][0] <= w[0] < skip[k][1]):
+            out.append(w)
     return out
 
 
 def _ref_words(reference: str) -> list[str]:
-    return [t[2] for t in _tokens(_clean(reference), reference=True)]
+    return [t[2] for t in _tokens(reference, reference=True)]
 
 
 def _index(ref: list[str]) -> dict[str, list[int]]:
@@ -78,12 +88,12 @@ def _match_len(words: list[str], i: int, ref: list[str], index: dict[str, list[i
 
 
 def word_count(text: str) -> int:
-    return len(_WORD.findall(_clean(text)))
+    return len(_words(text))
 
 
 def _first_words(text: str, n: int) -> str:
     """The prefix of `text` holding its first n words (text is returned whole if shorter)."""
-    spans = [m.end() for m in _WORD.finditer(text)]
+    spans = [w[1] for w in _words(text)]
     return text if len(spans) <= n else text[: spans[n - 1]] if n else ""
 
 
@@ -91,7 +101,7 @@ def longest_copied_run(text: str, reference: str) -> int:
     """Length in words of the longest run of `text` that appears verbatim in `reference`."""
     ref = _ref_words(reference)
     index = _index(ref)
-    words = [t[2] for t in _tokens(_clean(text))]
+    words = [t[2] for t in _tokens(text)]
     return max((_match_len(words, i, ref, index) for i in range(len(words))), default=0)
 
 
@@ -99,7 +109,7 @@ def copied_word_count(text: str, reference: str, min_run: int = MIN_COPY_RUN) ->
     """Words of `text` that sit inside a verbatim run of at least `min_run` words of `reference`."""
     ref = _ref_words(reference)
     index = _index(ref)
-    words = [t[2] for t in _tokens(_clean(text))]
+    words = [t[2] for t in _tokens(text)]
     covered, i = 0, 0
     while i < len(words):
         run = _match_len(words, i, ref, index)
@@ -125,7 +135,6 @@ class QuoteBudget:
 
     def fit(self, quote: str, per_quote: int = MAX_QUOTE_WORDS) -> str:
         """Truncate one explicit quote to its cap and the remaining budget; "" if none left."""
-        quote = _clean(quote)
         total = word_count(quote)
         granted = self.take(min(total, per_quote))
         if granted == 0:
@@ -182,7 +191,7 @@ def guard_fields(fields: list[str], reference: str = "", budget: QuoteBudget | N
     is cut instead of slipping under the per-field limit. Returns one string per field."""
     if not fields:
         return []
-    joined = _SEP.join(_clean(f).replace(_SEP, " ") for f in fields)
+    joined = _SEP.join(f.replace(_SEP, " ") for f in fields)
     parts = _truncate_copied_runs(joined, reference, budget).split(_SEP)
     if budget is not None:
         parts = [_limit_quoted_spans(p, budget) for p in parts]

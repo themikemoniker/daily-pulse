@@ -114,3 +114,14 @@ def test_cjk_text_is_counted_and_limited_per_character():
     copy = "要点是" + ref[10:110]
     assert longest_copied_run(guard_text(copy, ref), ref) <= 40
     assert len(re.findall(r"[一-鿿]", QuoteBudget().fit(ref))) <= 49
+
+
+def test_text_is_never_rewritten_unless_a_copy_is_cut():
+    title = "Foo™ می‌خواهم… ﬁne café wo​rd"
+    assert guard_text(title, _plain(80), QuoteBudget()) == title
+    assert QuoteBudget().fit("short… quote™") == "short… quote™"
+
+    copy = "Foo™ " + " ".join(f"wo​rd{i}" for i in range(60))
+    out = guard_text(copy, _plain(80))
+    assert out.startswith("Foo™ wo​rd0 wo​rd1")  # original characters kept
+    assert longest_copied_run(out, _plain(80)) <= 40
