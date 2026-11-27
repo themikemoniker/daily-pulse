@@ -406,3 +406,45 @@ def test_the_cli_registers_the_youtube_adapter(make_env, fixtures_dir):
                  "--date", DATE]) == 0
     res = json.loads((out / f"run-{DATE}.json").read_text())
     assert res["sources"]["youtube"]["status"] == "not configured"
+
+
+def test_an_oldest_first_playlist_still_keeps_the_newest_ten_on_the_first_run(env):
+    e = env()
+    e.cfg.write_text(e.cfg.read_text() + 'playlist_order = "oldest_first"\n')
+    ids = [f"v{i:02d}" for i in range(12)]  # position order: oldest first
+    subs = {i: {"manual": MANUAL} for i in ids}
+    res = e.go(FakeYtDlp(ids, subs=subs))
+    assert [i["id"] for i in res.sources["youtube"]["items"]] == list(reversed(ids))[:10]
+
+
+def test_private_and_deleted_placeholders_are_never_listed(env):
+    e = env()
+    client = FakeYtDlp(["pub", "gone", "priv"], subs={"pub": {"manual": MANUAL}})
+    plain = client.playlist
+
+    def listing(url):
+        entries = plain(url)
+        entries[1]["title"] = "[Deleted video]"
+        entries[2]["title"] = "[Private video]"
+        return entries
+
+    client.playlist = listing
+    res = e.go(client)
+    assert res.sources["youtube"]["status"] == "ok"
+    assert [i["id"] for i in res.sources["youtube"]["items"]] == ["pub"]
+    assert [c for c in client.calls if c[0] == "info"] == [("info", "pub")]
+
+
+def test_a_metadata_only_note_has_no_invented_timestamped_beats(env):
+    e = env()
+    e.go(FakeYtDlp(["v1"]))  # replies include a beat at 00:01, but there is no transcript to ground it
+    text = e.notes()[0].read_text()
+    assert "- [00:01]" not in text
+
+
+def test_a_real_run_without_a_notes_dir_fails_the_video_instead_of_consuming_it(env):
+    e = env()
+    registry.register(YouTubeAdapter(client=FakeYtDlp(["v1"], subs={"v1": {"manual": MANUAL}})))
+    res = run_pipeline(load_config(e.cfg), DATE, None)  # no out_dir: nowhere to write the note
+    assert res.sources["youtube"]["status"] == "failed"
+    assert not (e.data / "state" / "processed.json").exists()

@@ -26,6 +26,7 @@ log = logging.getLogger("daily_pulse")
 
 WATCH_URL = "https://www.youtube.com/watch?v="
 DESCRIPTION_EXCERPT = 500  # characters of the video description given to the rater
+UNAVAILABLE_TITLES = ("[private video]", "[deleted video]")  # placeholders that can never be fetched
 NO_CAPTIONS = "No captions available; rated from metadata only."
 METADATA_ONLY_TAG = "metadata-only"
 
@@ -180,13 +181,21 @@ class YouTubeAdapter(SourceAdapter):
         return None
 
     def list_new(self, ctx: AdapterContext) -> list[Item]:
-        """The playlist as yt-dlp lists it (newest first, as YouTube shows it)."""
+        """Newest first. `playlist_order` says how the playlist is ordered: "newest_first" (the
+        default, as YouTube shows "Watch later" and most saved lists) or "oldest_first" (a plain
+        list new videos are appended to). Private and deleted placeholders are left out."""
+        order = str(ctx.config.get("playlist_order") or "newest_first")
+        if order not in ("newest_first", "oldest_first"):
+            raise ValueError(f"playlist_order must be newest_first or oldest_first, got {order!r}")
         entries = self._yt(ctx).playlist(str(ctx.config["playlist_url"]).strip())
-        return [
+        items = [
             Item(source=self.name, id=e["id"], url=WATCH_URL + e["id"], title=str(e.get("title") or ""),
                  author=str(e.get("channel") or e.get("uploader") or ""))
-            for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
+            for e in entries
+            if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
+            and str(e.get("title") or "").strip().lower() not in UNAVAILABLE_TITLES
         ]
+        return items[::-1] if order == "oldest_first" else items
 
     def _captions(self, client, item: Item) -> str:
         """Cleaned captions: manual subtitles if the video has them, else auto captions, else ''."""
@@ -206,8 +215,10 @@ class YouTubeAdapter(SourceAdapter):
         item.published = _iso_date(info.get("upload_date"))
         item.metrics = {"duration": _count(info.get("duration")), "views": _count(info.get("view_count"))}
         item.text = str(info.get("description") or "").strip()[:DESCRIPTION_EXCERPT]
-        if ctx.dry_run or ctx.summarizer is None or ctx.notes_dir is None:
+        if ctx.dry_run:
             return item
+        if ctx.summarizer is None or ctx.notes_dir is None:  # never consume a video without a note
+            raise SummaryFailed(f"{item.id}: no summarizer or notes directory in the run context")
         transcript = self._captions(client, item)
         if transcript:
             write_transcript(ctx.data_dir, item, transcript)
@@ -218,6 +229,7 @@ class YouTubeAdapter(SourceAdapter):
             raise SummaryFailed(f"{item.id}: no rating, will retry next run")
         if not transcript:
             rating.tags = [*rating.tags, METADATA_ONLY_TAG]
+            rating.beats = []  # timestamps would be invented: there is no transcript to ground them
             rating.reason = "Metadata only (no captions): " + rating.reason
         write_note(item, rating, ctx.notes_dir, ctx.date, transcript)
         return item
