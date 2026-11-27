@@ -264,3 +264,125 @@ def test_notes_carry_no_transcript_text_beyond_short_quotes(env):
     assert "zq100word" not in note.read_text()
     assert "zq100word" in (e.data / "transcripts" / "youtube-v1.txt").read_text()
     assert not list((e.out).rglob("*.txt"))  # no transcript file anywhere in the output tree
+
+
+# --- the real yt-dlp client, driven against a fake yt-dlp executable ---
+
+import sys  # noqa: E402
+
+from daily_pulse.adapters.youtube import FixtureYtDlp, ProcessYtDlp, make_client  # noqa: E402
+
+FAKE_YTDLP = '''#!{python}
+import json, pathlib, sys
+d = pathlib.Path({dir!r})
+args = sys.argv[1:]
+n = len(list(d.glob("argv-*.json")))
+(d / f"argv-{{n}}.json").write_text(json.dumps(args))
+if (d / "exit").exists():
+    sys.stderr.write("ERROR: boom")
+    sys.exit(int((d / "exit").read_text()))
+url = args[-1]
+if "--flat-playlist" in args:
+    sys.stdout.write((d / "playlist.json").read_text())
+elif "--skip-download" in args and ("--write-subs" in args or "--write-auto-subs" in args):
+    kind = "auto" if "--write-auto-subs" in args else "manual"
+    vid = url.rsplit("=", 1)[-1]
+    src = d / f"{{vid}}.{{kind}}.vtt"
+    if src.exists():
+        out = pathlib.Path(args[args.index("-o") + 1].replace("%(id)s", vid).replace("%(ext)s", "vtt"))
+        out.with_name(f"{{vid}}.en.vtt").write_text(src.read_text())
+else:
+    sys.stdout.write((d / "info.json").read_text())
+'''
+
+
+@pytest.fixture
+def fake_ytdlp(tmp_path):
+    d = tmp_path / "fake-ytdlp"
+    d.mkdir()
+    exe = d / "yt-dlp"
+    exe.write_text(FAKE_YTDLP.format(python=sys.executable, dir=str(d)))
+    exe.chmod(0o755)
+
+    class Fake:
+        path = exe
+        dir = d
+
+        def argv(self, n):
+            return json.loads((d / f"argv-{n}.json").read_text())
+
+    return Fake()
+
+
+def test_the_process_client_lists_a_playlist_with_flat_playlist_json(fake_ytdlp):
+    (fake_ytdlp.dir / "playlist.json").write_text(json.dumps({"entries": [{"id": "a"}, {"id": "b"}]}))
+    entries = ProcessYtDlp(str(fake_ytdlp.path)).playlist("https://youtube.com/playlist?list=PL1")
+    assert [e["id"] for e in entries] == ["a", "b"]
+    args = fake_ytdlp.argv(0)
+    assert "--flat-playlist" in args and "-J" in args
+    assert args[-1] == "https://youtube.com/playlist?list=PL1"
+
+
+def test_the_process_client_reads_video_metadata_without_downloading(fake_ytdlp):
+    (fake_ytdlp.dir / "info.json").write_text(json.dumps({"id": "a", "title": "T"}))
+    assert ProcessYtDlp(str(fake_ytdlp.path)).info("https://www.youtube.com/watch?v=a")["title"] == "T"
+    assert "--skip-download" in fake_ytdlp.argv(0)
+
+
+def test_the_process_client_asks_for_manual_then_auto_english_subs(fake_ytdlp, tmp_path):
+    (fake_ytdlp.dir / "a.auto.vtt").write_text(MANUAL)
+    client = ProcessYtDlp(str(fake_ytdlp.path))
+    url = "https://www.youtube.com/watch?v=a"
+    dest = tmp_path / "subs"
+    dest.mkdir()
+    assert client.subtitles(url, False, dest) is None  # nothing manual exists
+    manual_args = fake_ytdlp.argv(0)
+    assert "--write-subs" in manual_args and "--write-auto-subs" not in manual_args
+    path = client.subtitles(url, True, dest)
+    assert path is not None and path.name == "a.en.vtt" and path.read_text() == MANUAL
+    auto_args = fake_ytdlp.argv(1)
+    assert "--write-auto-subs" in auto_args and "--skip-download" in auto_args
+    for args in (manual_args, auto_args):
+        assert args[args.index("--sub-langs") + 1] == "en"
+
+
+@pytest.mark.parametrize("call", [
+    lambda c: c.playlist("u"),
+    lambda c: c.info("u"),
+    lambda c: c.subtitles("u", False, Path(".")),
+])
+def test_the_process_client_turns_a_failing_yt_dlp_into_ytdlperror(fake_ytdlp, call):
+    (fake_ytdlp.dir / "exit").write_text("1")
+    with pytest.raises(YtDlpError, match="boom"):
+        call(ProcessYtDlp(str(fake_ytdlp.path)))
+
+
+def test_the_process_client_reports_a_missing_binary_and_unparseable_output(fake_ytdlp, tmp_path):
+    with pytest.raises(YtDlpError, match="cannot run"):
+        ProcessYtDlp(str(tmp_path / "nope")).playlist("u")
+    (fake_ytdlp.dir / "playlist.json").write_text("not json")
+    with pytest.raises(YtDlpError, match="not JSON"):
+        ProcessYtDlp(str(fake_ytdlp.path)).playlist("u")
+
+
+def test_the_binary_comes_from_the_env_then_the_config_then_the_path():
+    assert make_client({"ytdlp_cmd": "/opt/yt-dlp"}, None, env={}).cmd == "/opt/yt-dlp"
+    assert make_client({"ytdlp_cmd": "/opt/yt-dlp"}, None, env={"DAILY_PULSE_YTDLP": "/x/yt"}).cmd == "/x/yt"
+    assert make_client({}, None, env={}).cmd == "yt-dlp"
+
+
+def test_with_fixtures_the_adapter_reads_recorded_inputs_and_never_runs_yt_dlp(env, fixtures_dir):
+    d = fixtures_dir / "youtube"
+    d.mkdir(exist_ok=True)
+    (d / "playlist.json").write_text(json.dumps({"entries": [{"id": "fx1", "title": "Fixture"}]}))
+    (d / "fx1.info.json").write_text(json.dumps({"id": "fx1", "title": "Fixture", "channel": "C",
+                                                  "duration": 60, "upload_date": "20260110", "view_count": 5}))
+    (d / "fx1.en.vtt").write_text(MANUAL)
+    e = env()
+    registry.register(YouTubeAdapter())
+    cfg = load_config(e.cfg)
+    cfg.sources["youtube"]["ytdlp_cmd"] = "/definitely/not/there"
+    result = run_pipeline(cfg, DATE, fixtures_dir, out_dir=e.out)
+    assert result.sources["youtube"]["status"] == "ok"
+    assert [n.name for n in e.notes()] == ["youtube-fx1.md"]
+    assert isinstance(make_client({}, fixtures_dir), FixtureYtDlp)

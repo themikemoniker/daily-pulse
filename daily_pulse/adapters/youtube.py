@@ -9,8 +9,12 @@ only through a client object, so tests inject a fake.
 from __future__ import annotations
 
 import html
+import json
 import logging
+import os
 import re
+import shlex
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -65,6 +69,88 @@ class YtDlpError(Exception):
     """yt-dlp failed, or printed something unusable."""
 
 
+YTDLP_ENV = "DAILY_PULSE_YTDLP"
+YTDLP_TIMEOUT = 180.0  # seconds per yt-dlp call
+
+
+class ProcessYtDlp:
+    """The real client: runs the yt-dlp binary. `cmd` is a command string ("yt-dlp", or the path
+    to the copy `scripts/install-ytdlp.sh` put in the virtualenv)."""
+
+    def __init__(self, cmd: str = "yt-dlp", timeout: float = YTDLP_TIMEOUT):
+        self.cmd = cmd
+        self.timeout = timeout
+
+    def _run(self, *args: str) -> str:
+        try:
+            proc = subprocess.run([*shlex.split(self.cmd), "--no-warnings", *args], capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace", timeout=self.timeout,
+                                  stdin=subprocess.DEVNULL)
+        except (OSError, ValueError) as exc:
+            raise YtDlpError(f"cannot run {self.cmd!r}: {exc}") from None
+        except subprocess.TimeoutExpired:
+            raise YtDlpError(f"yt-dlp timed out after {self.timeout}s") from None
+        if proc.returncode != 0:
+            raise YtDlpError(f"yt-dlp exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
+        return proc.stdout
+
+    def _json(self, *args: str) -> dict:
+        try:
+            data = json.loads(self._run(*args))
+        except ValueError as exc:
+            raise YtDlpError(f"yt-dlp output is not JSON: {exc}") from None
+        if not isinstance(data, dict):
+            raise YtDlpError("yt-dlp output is not a JSON object")
+        return data
+
+    def playlist(self, url: str) -> list[dict]:
+        entries = self._json("--flat-playlist", "-J", url).get("entries")
+        if not isinstance(entries, list):
+            raise YtDlpError("playlist listing has no entries")
+        return entries
+
+    def info(self, url: str) -> dict:
+        return self._json("--no-playlist", "--skip-download", "-J", url)
+
+    def subtitles(self, url: str, auto: bool, dest: Path) -> Path | None:
+        """English captions as VTT in `dest`: the uploader's own subtitles, or (auto=True) the
+        auto-generated ones. None when the video has none of that kind."""
+        self._run("--no-playlist", "--skip-download", "--write-auto-subs" if auto else "--write-subs",
+                  "--sub-langs", "en", "--sub-format", "vtt", "-o", str(Path(dest) / "%(id)s.%(ext)s"), url)
+        return next(iter(sorted(Path(dest).glob("*.vtt"))), None)
+
+
+class FixtureYtDlp:
+    """Replays recorded yt-dlp output from `<fixtures>/youtube/`: playlist.json, <id>.info.json,
+    <id>.en.vtt (manual subtitles) and <id>.en.auto.vtt (auto captions)."""
+
+    def __init__(self, directory: Path):
+        self.dir = Path(directory)
+
+    def playlist(self, url: str) -> list[dict]:
+        return json.loads((self.dir / "playlist.json").read_text(encoding="utf-8"))["entries"]
+
+    def info(self, url: str) -> dict:
+        try:
+            return json.loads((self.dir / f"{url.rsplit('=', 1)[-1]}.info.json").read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise YtDlpError(f"no recorded metadata: {exc}") from None
+
+    def subtitles(self, url: str, auto: bool, dest: Path) -> Path | None:
+        src = self.dir / f"{url.rsplit('=', 1)[-1]}.en{'.auto' if auto else ''}.vtt"
+        return src if src.exists() else None
+
+
+def make_client(config: dict, fixtures_dir: Path | None, env=None):
+    """Recorded fixtures when `--fixtures` is given, else the yt-dlp binary: $DAILY_PULSE_YTDLP,
+    then `ytdlp_cmd` in [sources.youtube], then `yt-dlp` on PATH."""
+    if fixtures_dir is not None:
+        return FixtureYtDlp(Path(fixtures_dir) / "youtube")
+    env = os.environ if env is None else env
+    cmd = (env.get(YTDLP_ENV) or "").strip() or str(config.get("ytdlp_cmd") or "").strip() or "yt-dlp"
+    return ProcessYtDlp(cmd)
+
+
 class SummaryFailed(Exception):
     """The summarizer gave no rating; the video is retried on the next run."""
 
@@ -86,7 +172,7 @@ class YouTubeAdapter(SourceAdapter):
         self._client = client
 
     def _yt(self, ctx: AdapterContext):
-        return self._client
+        return self._client or make_client(ctx.config, ctx.fixtures_dir)
 
     def status(self, ctx: AdapterContext) -> str | None:
         if not str(ctx.config.get("playlist_url") or "").strip():
@@ -104,13 +190,12 @@ class YouTubeAdapter(SourceAdapter):
 
     def _captions(self, client, item: Item) -> str:
         """Cleaned captions: manual subtitles if the video has them, else auto captions, else ''."""
-        with tempfile.TemporaryDirectory(prefix="daily-pulse-subs-") as tmp:
-            for auto in (False, True):
+        for auto in (False, True):
+            with tempfile.TemporaryDirectory(prefix="daily-pulse-subs-") as tmp:
                 path = client.subtitles(item.url, auto, Path(tmp))
-                if path is not None:
-                    cleaned = clean_vtt(Path(path).read_text(encoding="utf-8", errors="replace"))
-                    if cleaned:
-                        return cleaned
+                cleaned = clean_vtt(Path(path).read_text(encoding="utf-8", errors="replace")) if path else ""
+            if cleaned:
+                return cleaned
         return ""
 
     def fetch_details(self, item: Item, ctx: AdapterContext) -> Item:
