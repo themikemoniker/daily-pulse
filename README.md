@@ -21,7 +21,7 @@ yet, so they do not reach the digest or the site. **X** is deferred (see [Deferr
    `[sources.instagram] kinds`. Each source has `enabled`. Adding an account is a one-line edit. Other tables:
    `[run]` (`first_run_cap`, `alert_after_failures`), `[paths] data_dir`, `[site] base_url`, `[summarizer]`
    (`claude_cmd`, `max_calls`) and `[quality]` (see [Quality gate](#quality-gate)).
-3. **Environment** (never in the config or the repo): `GITHUB_TOKEN` (optional, higher GitHub rate limits),
+3. **Environment** (never in the config or the repo): `GITHUB_TOKEN` (optional, higher GitHub rate limits; with no token set the shipped config borrows your `gh` login, see the GitHub section, and `use_gh_login = false` turns that off),
    `IG_CLI_CMD` (the Instagram command), `DAILY_PULSE_CLAUDE` (overrides `claude_cmd`), `DAILY_PULSE_YTDLP`.
 4. `claude` must be on the PATH of whatever runs the pipeline; it uses your Claude subscription, no API key.
 
