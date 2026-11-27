@@ -97,16 +97,42 @@ def test_other_failures_are_not_retried_and_are_not_rate_limits(fake_ytdlp):
     assert not isinstance(excinfo.value, YtDlpRateLimited) and waits == []
 
 
-def test_a_rate_limited_subtitle_download_reported_with_exit_0_is_a_rate_limit(fake_ytdlp, tmp_path):
+def test_a_rate_limited_subtitle_download_reported_with_exit_0_is_retried_then_raised(fake_ytdlp, tmp_path):
     (fake_ytdlp.dir / "sub-stderr").write_text(
         "WARNING: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests")
     waits = []
     dest = tmp_path / "subs"
     dest.mkdir()
-    client = ProcessYtDlp(str(fake_ytdlp.path), backoff=(5.0,), sleep=waits.append)
+    client = ProcessYtDlp(str(fake_ytdlp.path), backoff=(5.0, 7.0), sleep=waits.append)
     with pytest.raises(YtDlpRateLimited):
         client.subtitles("https://www.youtube.com/watch?v=a", True, dest)
-    assert waits == []  # exit 0 with a warning is reported, not retried here
+    assert waits == [5.0, 7.0] and len(list(fake_ytdlp.dir.glob("argv-*.json"))) == 3
+
+
+def test_a_warning_429_that_clears_on_retry_gives_the_captions(fake_ytdlp, tmp_path):
+    (fake_ytdlp.dir / "sub-stderr").write_text("WARNING: Unable to download subtitles: HTTP Error 429")
+    dest = tmp_path / "subs"
+    dest.mkdir()
+    waits = []
+
+    def clear_after_first(seconds):  # the throttle lifts, and the captions can be fetched, while it waits
+        waits.append(seconds)
+        (fake_ytdlp.dir / "sub-stderr").unlink()
+        (fake_ytdlp.dir / "a.auto.vtt").write_text(MANUAL)
+
+    client = ProcessYtDlp(str(fake_ytdlp.path), backoff=(5.0,), sleep=clear_after_first)
+    path = client.subtitles("https://www.youtube.com/watch?v=a", True, dest)
+    assert waits == [5.0] and path is not None and path.read_text() == MANUAL
+
+
+def test_a_429_with_only_a_different_english_track_written_is_not_accepted(fake_ytdlp, tmp_path):
+    (fake_ytdlp.dir / "sub-stderr").write_text("WARNING: Unable to download subtitles: HTTP Error 429")
+    dest = tmp_path / "subs"
+    dest.mkdir()
+    (dest / "a.en-orig.vtt").write_text(MANUAL)  # a stray track already in the directory
+    client = ProcessYtDlp(str(fake_ytdlp.path), backoff=(), sleep=lambda s: None)
+    with pytest.raises(YtDlpRateLimited):
+        client.subtitles("https://www.youtube.com/watch?v=a", True, dest)
 
 
 def test_calls_are_paced_but_the_first_one_is_not_delayed(fake_ytdlp):
@@ -146,12 +172,19 @@ def test_make_client_reads_the_config_keys():
 
 @pytest.mark.parametrize("cfg", [
     {"pace_seconds": -1}, {"pace_seconds": "3"}, {"pace_seconds": True},
+    {"pace_seconds": float("nan")}, {"pace_seconds": float("inf")}, {"pace_seconds": 7200},
+    {"rate_limit_backoff_seconds": [30, float("inf")]},
     {"rate_limit_backoff_seconds": 30}, {"rate_limit_backoff_seconds": [30, "x"]},
     {"ytdlp_extra_args": "--js-runtimes node"}, {"ytdlp_extra_args": ["ok", 3]},
 ])
 def test_make_client_rejects_a_malformed_setting(cfg):
     with pytest.raises(ValueError, match="sources.youtube"):
         make_client(cfg, None, env={})
+
+
+def test_a_malformed_setting_is_caught_even_with_fixtures(tmp_path):
+    with pytest.raises(ValueError, match="pace_seconds"):
+        make_client({"pace_seconds": "x"}, tmp_path)
 
 
 def test_the_shipped_config_sets_the_pacing_keys_and_they_are_valid():

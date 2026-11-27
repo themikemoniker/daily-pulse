@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -116,6 +117,7 @@ class YtDlpRateLimited(YtDlpError):
 RATE_LIMITED = re.compile(r"http error 429|too many requests", re.I)
 DEFAULT_PACE_SECONDS = 3.0  # pause between yt-dlp calls
 DEFAULT_BACKOFF_SECONDS = (30.0, 90.0)  # waits before the retries of a call that got a 429
+MAX_WAIT_SECONDS = 3600  # the longest single wait a setting may ask for
 
 
 YTDLP_ENV = "DAILY_PULSE_YTDLP"
@@ -139,12 +141,12 @@ class ProcessYtDlp:
         self._sleep = sleep
         self._calls = 0
 
-    def _exec(self, *args: str, warnings: bool = False) -> subprocess.CompletedProcess:
-        """One yt-dlp call, paced; a 429 is retried after each wait in `backoff` and then raised
-        as YtDlpRateLimited."""
+    def _with_backoff(self, call):
+        """Run `call`; when it raises YtDlpRateLimited, wait and run it again after each wait in
+        `backoff`, then let the last 429 through."""
         for wait in (*self.backoff, None):
             try:
-                return self._exec_once(*args, warnings=warnings)
+                return call()
             except YtDlpRateLimited as exc:
                 if wait is None:
                     raise
@@ -152,7 +154,8 @@ class ProcessYtDlp:
                             f"{wait:g}", str(exc)[-120:])
                 self._sleep(wait)
 
-    def _exec_once(self, *args: str, warnings: bool = False) -> subprocess.CompletedProcess:
+    def _exec(self, *args: str, warnings: bool = False) -> subprocess.CompletedProcess:
+        """One paced yt-dlp call. A 429 raises YtDlpRateLimited; the public methods retry it."""
         quiet = [] if warnings else ["--no-warnings"]
         if self._calls and self.pace > 0:
             self._sleep(self.pace)
@@ -183,13 +186,13 @@ class ProcessYtDlp:
         return data
 
     def playlist(self, url: str) -> list[dict]:
-        entries = self._json("--flat-playlist", "-J", url).get("entries")
+        entries = self._with_backoff(lambda: self._json("--flat-playlist", "-J", url)).get("entries")
         if not isinstance(entries, list):
             raise YtDlpError("playlist listing has no entries")
         return entries
 
     def info(self, url: str) -> dict:
-        return self._json("--no-playlist", "--skip-download", "-J", url)
+        return self._with_backoff(lambda: self._json("--no-playlist", "--skip-download", "-J", url))
 
     @staticmethod
     def _pick(files: list[Path]) -> Path | None:
@@ -199,16 +202,24 @@ class ProcessYtDlp:
 
     def subtitles(self, url: str, auto: bool, dest: Path) -> Path | None:
         """English captions as VTT in `dest`: the uploader's own subtitles, or (auto=True) the
-        auto-generated ones. None when the video has none of that kind."""
+        auto-generated ones. None when the video has none of that kind. The whole download is
+        retried on a 429, whether yt-dlp reports it as an error or only as a warning."""
+        return self._with_backoff(lambda: self._subtitles_once(url, auto, dest))
+
+    def _subtitles_once(self, url: str, auto: bool, dest: Path) -> Path | None:
         # Warnings stay on: yt-dlp reports a rate-limited subtitle download only as a warning
         # with exit 0, and that must not be mistaken for a video that has no subtitles.
         proc = self._exec("--no-playlist", "--skip-download", "--write-auto-subs" if auto else "--write-subs",
-                          "--sub-langs", "en.*,en", "--sub-format", "vtt",
-                          "-o", str(Path(dest) / "%(id)s.%(ext)s"), url, warnings=True)
+                               "--sub-langs", "en.*,en", "--sub-format", "vtt",
+                               "-o", str(Path(dest) / "%(id)s.%(ext)s"), url, warnings=True)
         found = self._pick(sorted(Path(dest).glob("*.vtt")))
+        throttled = bool(RATE_LIMITED.search(proc.stderr))
+        # A 429 while the plain `.en` track is missing: what was written (say en-orig) may be the
+        # wrong track, so retry or stop rather than rate the video from it.
+        if throttled and (found is None or not found.name.endswith(".en.vtt")):
+            raise YtDlpRateLimited(f"subtitle download failed: {proc.stderr.strip()[-300:]}")
         if found is None and SUBTITLE_FAILURE.search(proc.stderr):
-            message = f"subtitle download failed: {proc.stderr.strip()[-300:]}"
-            raise (YtDlpRateLimited if RATE_LIMITED.search(proc.stderr) else YtDlpError)(message)
+            raise YtDlpError(f"subtitle download failed: {proc.stderr.strip()[-300:]}")
         return found
 
 
@@ -236,27 +247,32 @@ class FixtureYtDlp:
 def make_client(config: dict, fixtures_dir: Path | None, env=None):
     """Recorded fixtures when `--fixtures` is given, else the yt-dlp binary: $DAILY_PULSE_YTDLP,
     then `ytdlp_cmd` in [sources.youtube], then `yt-dlp` on PATH."""
+    extra_args = _str_list(config, "ytdlp_extra_args", [])  # checked even with fixtures
+    pace = _seconds(config, "pace_seconds", DEFAULT_PACE_SECONDS)
+    backoff = tuple(_seconds_list(config, "rate_limit_backoff_seconds", DEFAULT_BACKOFF_SECONDS))
     if fixtures_dir is not None:
         return FixtureYtDlp(Path(fixtures_dir) / "youtube")
     env = os.environ if env is None else env
     cmd = (env.get(YTDLP_ENV) or "").strip() or str(config.get("ytdlp_cmd") or "").strip() or "yt-dlp"
-    return ProcessYtDlp(cmd, extra_args=_str_list(config, "ytdlp_extra_args", []),
-                        pace=_seconds(config, "pace_seconds", DEFAULT_PACE_SECONDS),
-                        backoff=tuple(_seconds_list(config, "rate_limit_backoff_seconds", DEFAULT_BACKOFF_SECONDS)))
+    return ProcessYtDlp(cmd, extra_args=extra_args, pace=pace, backoff=backoff)
+
+
+def _is_seconds(value) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and 0 <= value <= MAX_WAIT_SECONDS)
 
 
 def _seconds(config: dict, key: str, default: float) -> float:
     value = config.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-        raise ValueError(f"[sources.youtube] {key} must be a number of seconds, 0 or more, got {value!r}")
+    if not _is_seconds(value):
+        raise ValueError(f"[sources.youtube] {key} must be a number of seconds from 0 to 3600, got {value!r}")
     return float(value)
 
 
 def _seconds_list(config: dict, key: str, default) -> list[float]:
     value = config.get(key, list(default))
-    if not isinstance(value, list) or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0
-                                          for v in value):
-        raise ValueError(f"[sources.youtube] {key} must be a list of seconds (numbers, 0 or more), got {value!r}")
+    if not isinstance(value, list) or not all(_is_seconds(v) for v in value):
+        raise ValueError(f"[sources.youtube] {key} must be a list of seconds (numbers from 0 to 3600), got {value!r}")
     return [float(v) for v in value]
 
 
