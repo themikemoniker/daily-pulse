@@ -82,3 +82,32 @@ def test_failure_counters_persist_and_two_consecutive_failures_are_flagged(make_
     third = result(out)
     assert third["sources"]["boom"]["consecutive_failures"] == 0
     assert third["flagged"] == []
+
+
+def test_concurrent_run_exits_cleanly_with_message_and_leaves_state_alone(
+    make_env, fixtures_dir, capsys
+):
+    inner = {}
+
+    class Reentrant(FakeAdapter):
+        def list_new(self, ctx):
+            # While the outer run holds the lock, start a second run through the CLI.
+            inner["code"] = run(cfg, tmp_out / "inner", fixtures_dir)
+            return super().list_new(ctx)
+
+    registry.register(Reentrant())
+    cfg, data, out = make_env()
+    tmp_out = out
+    assert run(cfg, out, fixtures_dir) == 0
+    assert inner["code"] == 0
+    assert "another run is in progress" in capsys.readouterr().err
+    assert not (out / "inner").exists()  # the blocked run produced nothing
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["a1", "a2"]
+
+
+def test_lock_is_released_after_a_run(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    run(cfg, out, fixtures_dir)
+    run(cfg, out, fixtures_dir)
+    assert "another run is in progress" not in capsys.readouterr().err

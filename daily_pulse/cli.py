@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from datetime import date as _date
 from pathlib import Path
 
 from daily_pulse.config import DEFAULT_CONFIG, load_config
+from daily_pulse.lock import LockHeld, RunLock
 from daily_pulse.runner import run_pipeline
 
 
@@ -27,6 +29,16 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     config = load_config(args.config)
     date = args.date or _date.today().isoformat()
+    try:
+        with RunLock(config.data_dir):
+            return _run(args, config, date)
+    except LockHeld:
+        print(f"daily-pulse: another run is in progress (lock: {config.data_dir / 'run.lock'}); "
+              "exiting without changes", file=sys.stderr)
+        return 0
+
+
+def _run(args, config, date: str) -> int:
     log_dir = config.data_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = logging.FileHandler(log_dir / f"run-{date}.log")
