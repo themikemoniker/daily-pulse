@@ -232,7 +232,8 @@ def test_a_note_never_pastes_the_instagram_caption(pipeline):
 
 
 def processed(pipeline):
-    state = json.loads((pipeline.data / "state" / "processed.json").read_text())
+    path = pipeline.data / "state" / "processed.json"
+    state = json.loads(path.read_text()) if path.exists() else {}  # absent until something is processed
     return {name: set(ids) for name, ids in state.items()}
 
 
@@ -340,3 +341,32 @@ def test_a_dry_run_rates_nothing_and_writes_nothing(pipeline):
                  "--fixtures", str(pipeline.fixtures), "--dry-run"]) == 0
     assert pipeline.claude.calls == 0
     assert not pipeline.out.exists() and not pipeline.data.exists()
+
+
+def test_the_first_run_backlog_beyond_the_cap_is_logged_for_every_source(pipeline, caplog):
+    cfg = pipeline.cfg
+    cfg.write_text(cfg.read_text().replace("first_run_cap = 10", "first_run_cap = 1"))
+    with caplog.at_level("INFO", logger="daily_pulse"):
+        pipeline.go()
+    for name, older in (("instagram", "L1"), ("youtube", "vid2")):  # gated sources and the plain path
+        assert older in processed(pipeline)[name] and older not in noted(pipeline, name)
+        assert any(older in r.getMessage() and name in r.getMessage() and "first run" in r.getMessage()
+                   for r in caplog.records), name
+    done = processed(pipeline)["github"]
+    backlog = done - noted(pipeline, "github")
+    assert backlog
+    for gone in backlog:
+        assert any(gone in r.getMessage() for r in caplog.records), gone
+
+
+def test_a_failed_attempt_that_spends_the_last_call_is_a_cap_hit_not_a_source_failure(pipeline):
+    cfg = pipeline.cfg
+    cfg.write_text(cfg.read_text().replace("[run]", "[summarizer]\nmax_calls = 1\n\n[run]", 1)
+                   .replace("[sources.youtube]\nenabled = true", "[sources.youtube]\nenabled = false")
+                   .replace("[sources.github]\nenabled = true", "[sources.github]\nenabled = false"))
+    pipeline.claude.rules([["", "not json"]])  # the first attempt fails; the retry would exceed the cap
+    pipeline.go()
+    src = pipeline.result()["sources"]["instagram"]
+    assert pipeline.claude.calls == 1
+    assert src["status"] == "ok" and "instagram" not in pipeline.result()["flagged"]
+    assert not noted(pipeline, "instagram") and not processed(pipeline).get("instagram")  # retried next run

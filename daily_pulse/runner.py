@@ -36,6 +36,15 @@ class RunResult:
         return out
 
 
+def _mark_backlog(name, state, ids: list[str], cap: int | None) -> None:
+    """First run: the older items beyond `first_run_cap` are marked seen, with no note. Logged, so
+    no item is ever consumed silently."""
+    if ids:
+        log.info("%s: first run, %d older item(s) beyond the cap of %s marked seen without notes: %s",
+                 name, len(ids), cap, ", ".join(ids))
+    state.mark_processed(name, *ids)
+
+
 def _screen(name, adapter, ctx, state, gate, new, limit, dropped: list) -> list:
     """Run the quality gate over the new items and return the ones to process. Dropped items are
     logged locally, recorded in `dropped` and marked processed (so they are never looked at again,
@@ -47,7 +56,7 @@ def _screen(name, adapter, ctx, state, gate, new, limit, dropped: list) -> list:
     except Exception:  # noqa: BLE001 - fail open
         log.error("%s: quality gate failed, items continue unscreened\n%s", name, traceback.format_exc())
         if limit is not None:
-            state.mark_processed(name, *(i.id for i in new[limit:]))
+            _mark_backlog(name, state, [i.id for i in new[limit:]], limit)
         return new if limit is None else new[:limit]
     if ctx.persist and ctx.data_dir is not None:
         try:
@@ -58,7 +67,8 @@ def _screen(name, adapter, ctx, state, gate, new, limit, dropped: list) -> list:
     for d in screened.dropped:
         log.info("%s: %s dropped (%s): %s", name, d.item_id, "triage" if d.score is not None else "rule", d.reason)
         dropped.append({"id": d.item_id, "title": titles.get(d.item_id, ""), "score": d.score, "reason": d.reason})
-    state.mark_processed(name, *(d.item_id for d in screened.dropped), *(i.id for i in screened.remaining))
+    state.mark_processed(name, *(d.item_id for d in screened.dropped))
+    _mark_backlog(name, state, [i.id for i in screened.remaining], limit)
     return screened.kept
 
 
@@ -79,6 +89,8 @@ def _rate_and_note(name, adapter, item, ctx) -> None:
     text = adapter.rating_text(item, ctx)
     result = summarize_items(summarizer, [item], ctx.notes_dir, ctx.date, {item.id: text})[0]
     if result.status != "rated":
+        if summarizer.calls_made >= summarizer.max_calls:  # the cap, not the item, stopped the retry
+            raise ItemDeferred(f"{item.id}: claude call cap of {summarizer.max_calls} reached, not rated yet")
         raise RatingFailed(f"{item.id}: no rating, will retry next run")
 
 
@@ -104,11 +116,7 @@ def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list, gate=Non
     elif first_run:
         # Don't chew through a backlog: keep the newest few, and mark the rest as seen
         # (in one write) so later runs only handle genuinely new items.
-        backlog = [c.id for c in new[first_run_cap:]]
-        if backlog:
-            log.info("%s: first run, %d older item(s) beyond the cap of %d marked seen without notes",
-                     name, len(backlog), first_run_cap)
-        state.mark_processed(name, *backlog)
+        _mark_backlog(name, state, [c.id for c in new[first_run_cap:]], first_run_cap)
         new = new[:first_run_cap]
     error = None
     for candidate in new:
