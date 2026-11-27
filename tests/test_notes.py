@@ -87,3 +87,97 @@ def test_writing_the_same_item_twice_yields_the_identical_file(tmp_path):
     assert second == first
     assert second.read_bytes() == before
     assert sorted(p.name for p in first.parent.iterdir()) == ["youtube-abc123.md"]
+
+
+import re
+
+from daily_pulse.notes import write_transcript
+
+TRANSCRIPT = " ".join(f"word{i}" for i in range(120))
+
+
+def quoted_words(text: str) -> int:
+    """Words in blockquote lines plus words inside double quotes: what a reader sees as quoted."""
+    n = sum(len(line[1:].split()) for line in text.splitlines() if line.startswith(">"))
+    n += sum(len(q.split()) for q in re.findall(r'"([^"]*)"|“([^”]*)”', text.split("\n---\n", 1)[1])
+             for q in q if q)
+    return n
+
+
+def test_note_never_copies_more_than_forty_words_of_the_transcript(tmp_path):
+    copied = " ".join(f"word{i}" for i in range(5, 65))  # 60 words
+    rating = video_rating(
+        takeaways=[f"Takeaway {i}" for i in range(4)] + [f"He explains {copied} in detail"],
+        beats=[Beat("01:00", copied)],
+    )
+    path = write_note(video_item(), rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT)
+    from daily_pulse.quoteguard import longest_copied_run
+    assert longest_copied_run(path.read_text(), TRANSCRIPT) <= 40
+    assert "word64" not in path.read_text()
+
+
+def test_quotes_are_capped_well_under_fifty_words_per_note(tmp_path):
+    quotes = [" ".join(f"q{k}w{i}" for i in range(30)) for k in range(4)]  # 120 words offered
+    rating = video_rating(
+        quotes=quotes,
+        takeaways=["He says \"" + " ".join(f"t{i}" for i in range(30)) + "\" outright"] * 5,
+    )
+    text = write_note(video_item(), rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT).read_text()
+    assert 0 < quoted_words(text) <= 49
+
+
+def test_short_quotes_are_kept_as_blockquotes(tmp_path):
+    rating = video_rating(quotes=["evals are your unit tests now"])
+    text = write_note(video_item(), rating, tmp_path / "notes", DATE).read_text()
+    assert "## Quotes\n\n> evals are your unit tests now" in text
+
+
+def test_transcript_goes_only_under_data_transcripts(tmp_path):
+    notes, data = tmp_path / "notes", tmp_path / "data"
+    item = video_item()
+    path = write_transcript(data, item, TRANSCRIPT)
+    write_note(item, video_rating(), notes, DATE, transcript=TRANSCRIPT)
+
+    assert path == data / "transcripts" / "youtube-abc123.txt"
+    assert path.read_text() == TRANSCRIPT
+    for note in notes.rglob("*"):
+        if note.is_file():
+            assert "word50 word51 word52" not in note.read_text()
+    assert write_transcript(data, item, TRANSCRIPT) == path  # idempotent
+    assert path.read_text() == TRANSCRIPT
+
+
+from daily_pulse.notes import NoteError
+
+
+@pytest.mark.parametrize("over", [{"rating": 0}, {"rating": 11}, {"rating": "8"}, {"verdict": "binge"},
+                                  {"reason": "  "}, {"beats": [Beat("soon", "x")]}])
+def test_invalid_ratings_are_refused_and_nothing_is_written(tmp_path, over):
+    with pytest.raises(NoteError):
+        write_note(video_item(), video_rating(**over), tmp_path / "notes", DATE)
+    assert not (tmp_path / "notes").exists()
+
+
+def test_hostile_ids_cannot_escape_the_notes_directory(tmp_path):
+    item = video_item()
+    item.id = "../../evil"
+    path = write_note(item, video_rating(), tmp_path / "notes", DATE)
+    assert path.parent == tmp_path / "notes" / DATE
+    assert write_transcript(tmp_path / "data", item, "x").parent == tmp_path / "data" / "transcripts"
+
+
+def test_instagram_caption_is_guarded_like_a_transcript(tmp_path):
+    caption = " ".join(f"cap{i}" for i in range(70))
+    item = generic_item("instagram")
+    item.text = caption
+    rating = generic_rating()
+    rating.summary = caption
+    text = write_note(item, rating, tmp_path / "notes", DATE).read_text()
+    assert "cap69" not in text
+    assert "cap0 cap1" in text  # a short snippet survives
+
+
+def test_note_text_is_collapsed_to_single_lines(tmp_path):
+    rating = video_rating(reason="line one\nline two")
+    text = write_note(video_item(), rating, tmp_path / "notes", DATE).read_text()
+    assert "**8/10** — line one line two" in text
