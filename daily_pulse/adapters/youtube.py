@@ -191,6 +191,14 @@ class ProcessYtDlp:
             raise YtDlpError("playlist listing has no entries")
         return entries
 
+    def channel_videos(self, url: str, limit: int) -> list[dict]:
+        """The newest `limit` uploads of a channel (its /videos tab), flat."""
+        entries = self._with_backoff(
+            lambda: self._json("--flat-playlist", "--playlist-end", str(limit), "-J", url)).get("entries")
+        if not isinstance(entries, list):
+            raise YtDlpError("channel listing has no entries")
+        return entries[:limit]
+
     def info(self, url: str) -> dict:
         return self._with_backoff(lambda: self._json("--no-playlist", "--skip-download", "-J", url))
 
@@ -232,6 +240,13 @@ class FixtureYtDlp:
 
     def playlist(self, url: str) -> list[dict]:
         return json.loads((self.dir / "playlist.json").read_text(encoding="utf-8"))["entries"]
+
+    def channel_videos(self, url: str, limit: int) -> list[dict]:
+        try:
+            recorded = json.loads((self.dir / "channels.json").read_text(encoding="utf-8"))
+            return list(recorded[url.removesuffix("/videos")])[:limit]
+        except (OSError, KeyError, ValueError) as exc:
+            raise YtDlpError(f"no recorded channel listing for {url}: {exc}") from None
 
     def info(self, url: str) -> dict:
         try:
@@ -314,9 +329,39 @@ class YouTubeAdapter(SourceAdapter):
         return self._client or make_client(ctx.config, ctx.fixtures_dir)
 
     def status(self, ctx: AdapterContext) -> str | None:
-        if not str(ctx.config.get("playlist_url") or "").strip():
+        if not str(ctx.config.get("playlist_url") or "").strip() and not self._channels(ctx):
             return "not configured"
         return None
+
+    @staticmethod
+    def _channels(ctx: AdapterContext) -> list[str]:
+        value = ctx.config.get("channels") or []
+        return [c.strip() for c in value if isinstance(c, str) and c.strip()] if isinstance(value, list) else []
+
+    @staticmethod
+    def _channel_limit(ctx: AdapterContext) -> int:
+        value = ctx.config.get("channel_limit", 5)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"sources.youtube.channel_limit must be an integer >= 1, got {value!r}")
+        return value
+
+    def _channel_items(self, client, ctx: AdapterContext) -> list[list[Item]]:
+        """One newest-first list per watched channel. A channel that cannot be listed is logged and
+        skipped (the others and the playlist still run); a rate limit stops listing more channels."""
+        limit, lists = self._channel_limit(ctx), []
+        for url in self._channels(ctx):
+            try:
+                entries = client.channel_videos(url.rstrip("/") + "/videos", limit)
+            except YtDlpRateLimited as exc:
+                log.warning("youtube: rate limited while listing channels, the rest wait for a later run: %s", exc)
+                break
+            except Exception as exc:  # noqa: BLE001 - one bad channel must not end the source
+                log.warning("youtube: cannot list channel %s: %s", url, exc)
+                continue
+            lists.append([self._listed(e) for e in entries
+                          if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
+                          and str(e.get("title") or "").strip().lower() not in UNAVAILABLE_TITLES])
+        return lists
 
     def list_new(self, ctx: AdapterContext) -> list[Item]:
         """Newest first. Entries that carry an upload date are ordered by it. Otherwise
@@ -330,17 +375,36 @@ class YouTubeAdapter(SourceAdapter):
         order = str(ctx.config.get("playlist_order") or "").strip()
         if order not in ("", "newest_first", "oldest_first"):
             raise ValueError(f"playlist_order must be newest_first or oldest_first, got {order!r}")
-        client, url = self._yt(ctx), str(ctx.config["playlist_url"]).strip()
-        entries = client.playlist(url)
-        items = [self._listed(e) for e in entries
-                 if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
-                 and str(e.get("title") or "").strip().lower() not in UNAVAILABLE_TITLES]
-        if items:  # an empty listing is more likely a hiccup than a playlist with nothing left
-            self._prune_state(ctx, {i.id for i in items})
-        if items and all(i.published for i in items):  # real dates beat any declared order
-            return sorted(items, key=lambda i: i.published, reverse=True)
-        order = order or self._detect_order(client, url, items, ctx)
-        return items[::-1] if order == "oldest_first" else items
+        client, url = self._yt(ctx), str(ctx.config.get("playlist_url") or "").strip()
+        items: list[Item] = []
+        if url:
+            entries = client.playlist(url)
+            items = [self._listed(e) for e in entries
+                     if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
+                     and str(e.get("title") or "").strip().lower() not in UNAVAILABLE_TITLES]
+            if items and not all(i.published for i in items):  # real dates beat any declared order
+                order = order or self._detect_order(client, url, items, ctx)
+                items = items[::-1] if order == "oldest_first" else items
+            elif items:
+                items = sorted(items, key=lambda i: i.published, reverse=True)
+        channels = self._channel_items(client, ctx)
+        merged = self._interleave([items, *channels]) if channels else items
+        if merged:  # an empty listing is more likely a hiccup than a playlist with nothing left
+            self._prune_state(ctx, {i.id for i in merged})
+        return merged
+
+    @staticmethod
+    def _interleave(lists: list[list[Item]]) -> list[Item]:
+        """Round-robin over the playlist and each channel, newest first within each, so the
+        first-run cap and the per-run call cap spread across creators instead of one list
+        using them up. A video in two lists keeps its first place."""
+        out, seen = [], set()
+        for rank in range(max((len(l) for l in lists), default=0)):
+            for l in lists:
+                if rank < len(l) and l[rank].id not in seen:
+                    seen.add(l[rank].id)
+                    out.append(l[rank])
+        return out
 
     def _listed(self, entry: dict) -> Item:
         metrics = {}
