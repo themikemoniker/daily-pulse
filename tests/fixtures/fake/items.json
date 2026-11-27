@@ -1,0 +1,4 @@
+[
+  {"id": "a1", "title": "First fake item", "url": "https://example.test/a1", "author": "alice"},
+  {"id": "a2", "title": "Second fake item", "url": "https://example.test/a2", "author": "bob"}
+]
