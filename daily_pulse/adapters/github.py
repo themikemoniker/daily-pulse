@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import date as _date
 from datetime import datetime, timedelta, timezone
 
@@ -23,6 +27,36 @@ class RateLimited(Exception):
 
 MAX_WAIT_SECONDS = 30  # longest Retry-After / reset wait we will sit through
 MIN_REMAINING = 1  # stop issuing requests when this few remain
+
+
+class UrllibTransport:
+    """Real HTTP. The optional token is read from the environment on each call and only ever
+    placed in the Authorization header: it is not stored, logged or shown in repr."""
+
+    TOKEN_ENV = "GITHUB_TOKEN"
+    TIMEOUT = 30
+
+    def __repr__(self) -> str:
+        return "UrllibTransport()"
+
+    def __call__(self, path: str, params: dict):
+        url = f"{API}{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": "daily-pulse",
+                   "X-GitHub-Api-Version": "2022-11-28"}
+        token = os.environ.get(self.TOKEN_ENV, "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=self.TIMEOUT) as resp:
+                status, resp_headers, raw = resp.status, dict(resp.headers), resp.read()
+        except urllib.error.HTTPError as err:
+            status, resp_headers, raw = err.code, dict(err.headers or {}), err.read()
+        try:
+            body = json.loads(raw or b"null")
+        except ValueError:
+            body = {"message": raw[:200].decode("utf-8", "replace")}
+        return status, resp_headers, body
 
 
 class FixtureTransport:
@@ -62,7 +96,8 @@ class GitHubAdapter(SourceAdapter):
     def _get(self, ctx: AdapterContext, path: str, params: dict | None = None):
         """One API call. Raises RateLimited when the budget is spent; waits out a short
         Retry-After (once) first."""
-        transport = self._transport or FixtureTransport(ctx.fixtures_dir)
+        transport = self._transport or (
+            FixtureTransport(ctx.fixtures_dir) if ctx.fixtures_dir else UrllibTransport())
         for attempt in (1, 2):
             if self._exhausted:
                 raise RateLimited(self._exhausted)
