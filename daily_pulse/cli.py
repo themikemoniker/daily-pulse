@@ -12,9 +12,9 @@ import tomllib
 from datetime import date as _date
 from pathlib import Path
 
-from daily_pulse.adapters import registry
-from daily_pulse.adapters.youtube import YouTubeAdapter
+from daily_pulse.adapters.registry import register_builtin
 from daily_pulse.config import DEFAULT_CONFIG, ConfigError, load_config
+from daily_pulse.digest import parse_time, write_digest
 from daily_pulse.lock import LockError, LockHeld, RunLock
 from daily_pulse.runner import run_pipeline
 from daily_pulse.state import StateError, atomic_write_json
@@ -36,6 +36,12 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--out", type=Path, required=True, help="output directory")
     r.add_argument("--fixtures", type=Path, default=None, help="read recorded inputs, no network")
     r.add_argument("--dry-run", action="store_true", help="write no state or output")
+    d = sub.add_parser("digest", help="build digests/<date>.md and .html from the day's notes")
+    d.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    d.add_argument("--date", default=None, type=_iso_date, help="digest date, YYYY-MM-DD (default: today)")
+    d.add_argument("--out", type=Path, required=True,
+                   help="output directory holding notes/ and run-<date>.json; digests/ is written here")
+    d.add_argument("--base-url", default=None, help="site root for absolute links (default: config site.base_url)")
     return p
 
 
@@ -46,9 +52,10 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, tomllib.TOMLDecodeError, ConfigError) as exc:
         print(f"daily-pulse: cannot load config {args.config}: {exc}", file=sys.stderr)
         return 1
+    register_builtin()
     date = args.date or _date.today().isoformat()
-    if registry.get("youtube") is None:
-        registry.register(YouTubeAdapter())
+    if args.command == "digest":
+        return _digest(args, config, date)
     try:
         if args.dry_run:  # touches nothing on disk, so needs no lock
             result = run_pipeline(config, date, args.fixtures, dry_run=True)
@@ -65,6 +72,31 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
 
+def _digest(args, config, date: str) -> int:
+    """Rebuild the day's digest from notes on disk plus the run result for source statuses."""
+    sources: dict = {}
+    now = None  # falls back to the end of `date`
+    result_path = args.out / f"run-{date}.json"
+    try:
+        recorded = json.loads(result_path.read_text(encoding="utf-8"))
+        sources = recorded.get("sources", {})
+        if not isinstance(sources, dict):
+            raise ValueError("'sources' is not an object")
+        now = parse_time(recorded.get("generated_at"))
+    except FileNotFoundError:
+        pass  # no run recorded: statuses are derived from the notes alone
+    except (OSError, ValueError, AttributeError) as exc:
+        print(f"daily-pulse: ignoring unreadable {result_path}: {exc}", file=sys.stderr)
+        sources = {}
+    base_url = config.base_url if args.base_url is None else args.base_url
+    try:
+        write_digest(args.out / "notes", args.out / "digests", date, sources=sources, base_url=base_url, now=now)
+    except Exception as exc:  # noqa: BLE001 - whatever went wrong, say so cleanly rather than a traceback
+        print(f"daily-pulse: cannot write digest under {args.out / 'digests'}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _preflight_out(out: Path) -> None:
     """Prove we can really write to `out` before any item is consumed."""
     out.mkdir(parents=True, exist_ok=True)
@@ -75,9 +107,16 @@ def _preflight_out(out: Path) -> None:
 def _write_result(out: Path, date: str, payload: dict) -> None:
     """Write run-<date>.json atomically. An earlier file for the same date is kept as
     run-<date>.<n>.json, but only once the new file is fully written, so a failed write
-    never loses the earlier result."""
+    never loses the earlier result. A rerun keeps the date's first `generated_at`, so the digest's
+    age reference (and with it the diamond callout) does not move when a day is run again."""
     target = out / f"run-{date}.json"
     staged = out / f".run-{date}.json.new"
+    try:
+        first = json.loads(target.read_text(encoding="utf-8")).get("generated_at")
+    except (OSError, ValueError, AttributeError):  # no earlier file, or an unreadable one
+        first = None
+    if isinstance(first, str) and first:
+        payload = {**payload, "generated_at": first}
     try:
         atomic_write_json(staged, payload)
         if target.exists():

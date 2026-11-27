@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from daily_pulse.adapters import registry
@@ -21,9 +22,11 @@ class RunResult:
     sources: dict[str, dict] = field(default_factory=dict)
     flagged: list[str] = field(default_factory=list)
     error: str | None = None  # set when a state error aborted the run part-way
+    generated_at: str = field(  # when the run happened (UTC); the digest measures item ages from it
+        default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
     def to_dict(self) -> dict:
-        out = {"date": self.date, "sources": self.sources, "flagged": self.flagged}
+        out = {"date": self.date, "generated_at": self.generated_at, "sources": self.sources, "flagged": self.flagged}
         if self.error:
             out["error"] = self.error
         return out
