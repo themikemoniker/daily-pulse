@@ -171,20 +171,20 @@ class Summarizer:
         """One `claude -p` run, in its own process group and an empty scratch directory (so it
         loads none of this repo's CLAUDE.md/AGENTS.md). On timeout the whole group is killed:
         helper processes (node, MCP servers) would otherwise hold the pipes open."""
-        try:
-            with tempfile.TemporaryDirectory(prefix="daily-pulse-claude-") as scratch:
+        with tempfile.TemporaryDirectory(prefix="daily-pulse-claude-", ignore_cleanup_errors=True) as scratch:
+            try:
                 proc = subprocess.Popen(
                     self._argv(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     cwd=scratch, start_new_session=True, encoding="utf-8", errors="replace")
-                try:
-                    stdout, stderr = proc.communicate(prompt, timeout=self.timeout)
-                except subprocess.TimeoutExpired:
-                    self.calls_made += 1
-                    raise CallFailed(f"timed out after {self.timeout}s") from None
-                finally:
-                    self._kill_group(proc)  # helpers that outlive a finished claude
-        except (OSError, ValueError) as exc:  # not found, not executable, bad command string
-            raise CannotRun(f"cannot run {self.claude_cmd!r}: {exc}") from None
+            except (OSError, ValueError) as exc:  # not found, not executable, bad command string
+                raise CannotRun(f"cannot run {self.claude_cmd!r}: {exc}") from None
+            try:
+                stdout, stderr = proc.communicate(prompt, timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                self.calls_made += 1
+                raise CallFailed(f"timed out after {self.timeout}s") from None
+            finally:
+                self._kill_group(proc)  # also helpers that outlive a finished claude
         self.calls_made += 1
         if proc.returncode != 0:
             raise CallFailed(f"exit {proc.returncode}: {stderr.strip()[:200]}")

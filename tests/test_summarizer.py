@@ -453,11 +453,11 @@ def test_a_hung_claude_and_its_helper_processes_are_killed_promptly(tmp_path):
     # Like node/MCP helpers: a grandchild that inherits the pipes and outlives the timeout.
     script.write_text(f"#!/bin/sh\nsleep 20 &\necho $! > {pidfile}\nwait\n")
     script.chmod(0o755)
-    s = Summarizer(claude_cmd=str(script), timeout=0.5, max_calls=1)
+    s = Summarizer(claude_cmd=str(script), timeout=1.5, max_calls=1)
     start = time.monotonic()
     assert s.rate(repo_item()) is None
     assert time.monotonic() - start < 8
-    pid = int(pidfile.read_text())
+    pid = int(pidfile.read_text())  # written before the helper starts waiting, well inside 1.5s
     for _ in range(40):  # the helper must be gone (a zombie awaiting reaping counts as gone)
         try:
             state = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
@@ -500,12 +500,13 @@ def test_non_ascii_items_survive_a_non_utf8_locale(fake_claude, tmp_path):
         "r = s.rate(Item('github', 'x', 'https://x', 'Évals — naïve café', 'zoë'))\n"
         "print(r.summary, s.calls_made)\n" % str(claude.path)
     )
-    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C", "PYTHONCOERCECLOCALE": "0",
+    repo = pathlib.Path(__file__).parent.parent
+    env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(repo), "LC_ALL": "C", "LANG": "C", "PYTHONCOERCECLOCALE": "0",
            "PYTHONUTF8": "0", "PYTHONIOENCODING": "utf-8"}
     script = tmp_path / "run.py"  # a file, not -c: argv would be mangled by the C locale
     script.write_text(code, encoding="utf-8")
     out = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, encoding="utf-8",
-                         cwd=pathlib.Path(__file__).parent.parent)
+                         cwd=repo)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "Résumé de l'agent — café 1"  # one call: no decode error, no retry
     assert "Évals — naïve café" in claude.stdin(0)
