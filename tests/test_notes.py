@@ -197,18 +197,6 @@ def test_total_words_lifted_from_the_transcript_stay_under_fifty_across_all_fiel
     assert copied_word_count(text, TRANSCRIPT) <= 49
 
 
-def test_total_words_lifted_from_the_transcript_stay_under_fifty_across_all_fields(tmp_path):
-    copied = " ".join(f"word{i}" for i in range(5, 65))
-    rating = video_rating(
-        quotes=[copied, copied],
-        takeaways=[f"He explains {copied}"] * 5,
-        beats=[Beat("01:00", copied), Beat("02:00", copied)],
-        reason=copied,
-    )
-    text = write_note(video_item(), rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT).read_text()
-    assert copied_word_count(text, TRANSCRIPT) <= 49
-
-
 # --- review round ------------------------------------------------------------------------------
 
 def test_title_author_and_tags_are_guarded_and_share_the_budget(tmp_path):
@@ -282,3 +270,8 @@ def test_contiguous_copy_spread_over_adjacent_fields_is_truncated_not_lost(tmp_p
     path = write_note(video_item(), rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT)
     assert longest_copied_run(path.read_text(), TRANSCRIPT) <= 40
     assert "Plain two" in path.read_text()
+
+
+def test_untagged_item_renders_an_empty_tag_list(tmp_path):
+    text = write_note(video_item(), video_rating(tags=[]), tmp_path / "notes", DATE).read_text()
+    assert "\ntags: []\n" in text

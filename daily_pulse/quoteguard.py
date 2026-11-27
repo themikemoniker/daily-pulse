@@ -180,6 +180,8 @@ def guard_fields(fields: list[str], reference: str = "", budget: QuoteBudget | N
     """Apply both rules to fields that sit next to each other in a note (a list of takeaways,
     say). They are checked as one text, so a copy that continues from one field into the next
     is cut instead of slipping under the per-field limit. Returns one string per field."""
+    if not fields:
+        return []
     joined = _SEP.join(_clean(f).replace(_SEP, " ") for f in fields)
     parts = _truncate_copied_runs(joined, reference, budget).split(_SEP)
     if budget is not None:
