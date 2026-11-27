@@ -16,9 +16,10 @@ import re
 import shlex
 import subprocess
 import tempfile
+from datetime import date as _date
 from pathlib import Path
 
-from daily_pulse.adapters.base import AdapterContext, ItemSkipped, SourceAdapter
+from daily_pulse.adapters.base import AdapterContext, ItemDeferred, ItemSkipped, SourceAdapter
 from daily_pulse.models import Item
 from daily_pulse.notes import write_note, write_transcript
 from daily_pulse.state import atomic_write_json
@@ -28,7 +29,16 @@ log = logging.getLogger("daily_pulse")
 WATCH_URL = "https://www.youtube.com/watch?v="
 DESCRIPTION_EXCERPT = 500  # characters of the video description given to the rater
 UNAVAILABLE_TITLES = ("[private video]", "[deleted video]")  # placeholders that can never be fetched
-MAX_ATTEMPTS = 3  # yt-dlp failures for one video before it is given up on
+MAX_ATTEMPTS = 3  # video-specific yt-dlp failures for one video before it is given up on
+RECENT_DAYS = 2  # a video uploaded this recently may not have captions yet
+CAPTION_WAIT_DAYS = 3  # how long, from first sight, a video with no captions is waited for
+# yt-dlp errors that say nothing about one video (rate limit, network, bot check, broken binary):
+# never a strike against a video, and the run stops for the source instead of hammering yt-dlp
+SOURCE_LEVEL_ERRORS = re.compile(
+    r"cannot run|timed out|http error 429|too many requests|unable to download|not a bot"
+    r"|unable to extract|network|connection|temporary failure|name or service|http error 5\d\d", re.I)
+# a video that is not out yet (premiere, scheduled live): worth a few retries, not a lost video
+NOT_YET_AVAILABLE = re.compile(r"premieres? in|premiere will begin|live event will begin|will begin in", re.I)
 # yt-dlp errors that no retry will fix: skip the video at once
 PERMANENT_ERRORS = re.compile(
     r"private video|members-only|members only|join this channel|confirm your age|age-restricted"
@@ -190,6 +200,7 @@ class YouTubeAdapter(SourceAdapter):
 
     def __init__(self, client=None):
         self._client = client
+        self._halted: str | None = None  # set by a source-level yt-dlp failure; cleared by list_new
 
     def _yt(self, ctx: AdapterContext):
         return self._client or make_client(ctx.config, ctx.fixtures_dir)
@@ -203,6 +214,7 @@ class YouTubeAdapter(SourceAdapter):
         """Newest first. `playlist_order` says how the playlist is ordered: "newest_first" (the
         default, as YouTube shows "Watch later" and most saved lists) or "oldest_first" (a plain
         list new videos are appended to). Private and deleted placeholders are left out."""
+        self._halted = None
         order = str(ctx.config.get("playlist_order") or "newest_first")
         if order not in ("newest_first", "oldest_first"):
             raise ValueError(f"playlist_order must be newest_first or oldest_first, got {order!r}")
@@ -226,30 +238,72 @@ class YouTubeAdapter(SourceAdapter):
                 return cleaned
         return ""
 
-    def _attempts_path(self, ctx: AdapterContext) -> Path | None:
-        return None if ctx.data_dir is None or ctx.dry_run else Path(ctx.data_dir) / "state" / "youtube-attempts.json"
+    @staticmethod
+    def _state_file(ctx: AdapterContext, name: str) -> Path | None:
+        return None if ctx.data_dir is None or ctx.dry_run else Path(ctx.data_dir) / "state" / name
+
+    @staticmethod
+    def _load_map(path: Path | None) -> dict:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path and path.exists() else {}
+        except (OSError, ValueError):
+            data = {}
+        return data if isinstance(data, dict) else {}
 
     def _record_failure(self, item: Item, exc: YtDlpError, ctx: AdapterContext) -> None:
-        """Count a yt-dlp failure for this video. A permanent error, or the MAX_ATTEMPTS-th failure,
-        raises ItemSkipped (the runner marks the video processed, so it stops being retried and
-        stops failing the source); otherwise the failure goes on to the runner, which retries next run."""
-        if PERMANENT_ERRORS.search(str(exc)):
-            raise ItemSkipped(f"{item.id}: {exc}") from exc
-        path = self._attempts_path(ctx)
-        if path is None:
+        """Handle a yt-dlp failure for one video. Source-level errors (rate limit, timeout,
+        network, bot check, broken binary) are no strike against the video: the run stops for the
+        source. A permanent error skips the video at once. Only a "not out yet" error is counted,
+        and the MAX_ATTEMPTS-th such failure raises ItemSkipped (the runner marks the video
+        processed, so it stops failing the source). Anything else just fails this run."""
+        message = str(exc)
+        if SOURCE_LEVEL_ERRORS.search(message):
+            self._halted = message
             return
+        if PERMANENT_ERRORS.search(message):
+            raise ItemSkipped(f"{item.id}: {message}") from exc
+        path = self._state_file(ctx, "youtube-attempts.json")
+        if path is None or not NOT_YET_AVAILABLE.search(message):
+            return
+        counts = self._load_map(path)
+        counts[item.id] = n = (counts.get(item.id) if isinstance(counts.get(item.id), int) else 0) + 1
         try:
-            counts = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-            counts = counts if isinstance(counts, dict) else {}
-            counts[item.id] = n = (counts.get(item.id) if isinstance(counts.get(item.id), int) else 0) + 1
             atomic_write_json(path, counts)
-        except (OSError, ValueError) as exc2:  # counting must never hide the real failure
+        except OSError as exc2:  # counting must never hide the real failure
             log.warning("youtube: cannot record the failed attempt for %s: %s", item.id, exc2)
             return
         if n >= MAX_ATTEMPTS:
-            raise ItemSkipped(f"{item.id}: failed {n} times, giving up: {exc}") from exc
+            raise ItemSkipped(f"{item.id}: failed {n} times, giving up: {message}") from exc
+
+    @staticmethod
+    def _days_between(later: str, earlier: str) -> int | None:
+        try:
+            return (_date.fromisoformat(_iso_date(later)) - _date.fromisoformat(_iso_date(earlier))).days
+        except ValueError:
+            return None
+
+    def _awaiting_captions(self, item: Item, info: dict, ctx: AdapterContext) -> bool:
+        """True while a video that has no captions is recent or live and has been waited for less
+        than CAPTION_WAIT_DAYS: its auto-captions probably just are not there yet. The wait is
+        counted from the first run that saw it, separately from failure strikes."""
+        age = self._days_between(ctx.date, str(info.get("upload_date") or ""))
+        live = info.get("live_status") in ("is_live", "is_upcoming", "post_live") or info.get("is_live") is True
+        if not (live or (age is not None and age <= RECENT_DAYS)):
+            return False
+        path = self._state_file(ctx, "youtube-pending.json")
+        first_seen = self._load_map(path)
+        waited = self._days_between(ctx.date, str(first_seen.get(item.id) or ctx.date)) or 0
+        if item.id not in first_seen and path is not None:
+            first_seen[item.id] = ctx.date
+            try:
+                atomic_write_json(path, first_seen)
+            except OSError as exc:
+                log.warning("youtube: cannot record when %s was first seen: %s", item.id, exc)
+        return waited < CAPTION_WAIT_DAYS
 
     def fetch_details(self, item: Item, ctx: AdapterContext) -> Item:
+        if self._halted:  # yt-dlp is unusable right now: don't call it again this run
+            raise YtDlpError(f"not tried, yt-dlp failed earlier in this run: {self._halted}")
         try:
             return self._fetch(item, ctx)
         except YtDlpError as exc:
@@ -269,6 +323,8 @@ class YouTubeAdapter(SourceAdapter):
         if ctx.summarizer is None or ctx.notes_dir is None:  # never consume a video without a note
             raise SummaryFailed(f"{item.id}: no summarizer or notes directory in the run context")
         transcript = self._captions(client, item)
+        if not transcript and self._awaiting_captions(item, info, ctx):
+            raise ItemDeferred(f"{item.id}: no captions yet, will look again next run")
         if transcript:
             write_transcript(ctx.data_dir, item, transcript)
         else:

@@ -73,8 +73,12 @@ def rating_reply(**over):
 class FakeYtDlp:
     """Stands in for yt-dlp: canned playlist, per-video info and captions. Records every call."""
 
-    def __init__(self, ids=(), subs=None, fail_info=(), fail_playlist=False, fail_message=None):
+    def __init__(self, ids=(), subs=None, fail_info=(), fail_playlist=False, fail_message=None,
+                 upload_date="20260112", live_status=None, fail_all=None):
         self.fail_message = fail_message
+        self.upload_date = upload_date
+        self.live_status = live_status
+        self.fail_all = fail_all
         self.ids = list(ids)
         self.subs = subs or {}  # id -> {"manual": vtt, "auto": vtt}
         self.fail_info = set(fail_info)
@@ -90,10 +94,12 @@ class FakeYtDlp:
     def info(self, url):
         vid = url.rsplit("=", 1)[-1]
         self.calls.append(("info", vid))
+        if self.fail_all:
+            raise YtDlpError(self.fail_all)
         if vid in self.fail_info:
             raise YtDlpError(self.fail_message or f"cannot fetch {vid}")
         return {"id": vid, "title": f"Title {vid}", "channel": "Chan", "duration": 754,
-                "upload_date": "20260112", "view_count": 4321,
+                "upload_date": self.upload_date, "view_count": 4321, "live_status": self.live_status,
                 "description": "A talk about loops.\nSecond line."}
 
     def subtitles(self, url, auto, dest):
@@ -125,9 +131,9 @@ def env(fake_claude, monkeypatch, tmp_path):
         e = Env()
         e.cfg, e.data, e.out, e.claude = cfg, data, out, claude
 
-        def go(client):
+        def go(client, date=DATE):
             registry.register(YouTubeAdapter(client=client))
-            return run_pipeline(load_config(cfg), DATE, None, out_dir=out)
+            return run_pipeline(load_config(cfg), date, None, out_dir=out)
 
         e.go = go
         e.notes = lambda: sorted((out / "notes" / DATE).glob("*.md")) if (out / "notes" / DATE).exists() else []
@@ -481,7 +487,8 @@ def test_a_video_whose_captions_were_rate_limited_is_not_rated_or_marked_process
 
 def test_a_video_that_keeps_failing_is_given_up_on_after_three_attempts(env):
     e = env()
-    statuses = [e.go(FakeYtDlp(["good", "bad"], fail_info={"bad"}, subs={"good": {"manual": MANUAL}}))
+    soon = "ERROR: [youtube] bad: Premieres in 2 hours"  # video-specific, may work later
+    statuses = [e.go(FakeYtDlp(["good", "bad"], fail_info={"bad"}, fail_message=soon, subs={"good": {"manual": MANUAL}}))
                 .sources["youtube"]["status"] for _ in range(3)]
     assert statuses == ["failed", "failed", "ok"]
     processed = json.loads((e.data / "state" / "processed.json").read_text())["youtube"]
@@ -523,3 +530,50 @@ def test_the_prompt_tells_the_model_to_use_h_mm_ss_past_one_hour():
     from daily_pulse.summarizer import DEFAULT_PROMPTS_DIR
 
     assert "H:MM:SS" in (DEFAULT_PROMPTS_DIR / "summarize.md").read_text()
+
+
+# --- review round 2 ---
+
+@pytest.mark.parametrize("message", [
+    "ERROR: unable to download video data: HTTP Error 429: Too Many Requests",
+    "yt-dlp timed out after 180.0s",
+    "ERROR: Sign in to confirm you're not a bot. Use --cookies-from-browser",
+    "cannot run 'yt-dlp': [Errno 2] No such file or directory",
+])
+def test_source_level_yt_dlp_failures_never_count_toward_giving_up_a_video(env, message):
+    e = env()
+    for _ in range(4):
+        client = FakeYtDlp(["a", "b"], fail_all=message)
+        res = e.go(client)
+        assert res.sources["youtube"]["status"] == "failed"
+        assert [c for c in client.calls if c[0] == "info"] == [("info", "a")]  # the run stops for the source
+    assert not (e.data / "state" / "youtube-attempts.json").exists()
+    processed = e.data / "state" / "processed.json"
+    assert not processed.exists() or json.loads(processed.read_text()).get("youtube", []) == []
+    ok = e.go(FakeYtDlp(["a", "b"], subs={"a": {"manual": MANUAL}, "b": {"manual": MANUAL}}))
+    assert [i["id"] for i in ok.sources["youtube"]["items"]] == ["a", "b"]
+
+
+def test_a_fresh_video_with_no_captions_yet_is_retried_then_gets_a_flagged_metadata_only_note(env):
+    e = env()
+    fresh = FakeYtDlp(["new"], upload_date="20260115")  # uploaded on the run date, no captions
+    res = e.go(fresh, date="2026-01-15")
+    assert res.sources["youtube"]["status"] == "ok"  # waiting is not a failure
+    assert res.sources["youtube"]["items"] == []
+    assert e.claude.calls == 0 and list(e.out.rglob("*.md")) == []
+    processed = e.data / "state" / "processed.json"
+    assert not processed.exists() or "new" not in json.loads(processed.read_text()).get("youtube", [])
+    later = e.go(FakeYtDlp(["new"], upload_date="20260115"), date="2026-01-19")  # 4 days on, still none
+    [note] = list(e.out.rglob("*.md"))
+    assert "Metadata only (no captions)" in note.read_text()
+    assert [i["id"] for i in later.sources["youtube"]["items"]] == ["new"]
+
+
+def test_a_live_video_without_captions_is_only_waited_for_three_days(env):
+    e = env()
+    for day in ("2026-01-15", "2026-01-16", "2026-01-17"):
+        client = FakeYtDlp(["stream"], upload_date="20260101", live_status="is_live")
+        assert e.go(client, date=day).sources["youtube"]["items"] == []
+    assert list(e.out.rglob("*.md")) == []
+    res = e.go(FakeYtDlp(["stream"], upload_date="20260101", live_status="is_live"), date="2026-01-18")
+    assert [i["id"] for i in res.sources["youtube"]["items"]] == ["stream"]

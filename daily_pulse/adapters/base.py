@@ -24,6 +24,11 @@ class ItemSkipped(Exception):
     often): the runner marks it processed and carries on, with no error and no item."""
 
 
+class ItemDeferred(Exception):
+    """Raised by `fetch_details` when an item is not ready yet (not an error): the runner leaves
+    it unprocessed, so the next run looks at it again, and reports nothing as failed."""
+
+
 class SourceAdapter(ABC):
     name: str
 
