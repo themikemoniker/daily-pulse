@@ -147,3 +147,120 @@ def test_a_new_video_becomes_one_note_with_its_metadata(env):
     assert "views: 4321" in text
     assert "## The argument, beat by beat" in text
     assert "- [00:01] Opens with the problem." in text
+
+
+def stdin_of(e, n=0):
+    return e.claude.stdin(n)
+
+
+def test_manual_subtitles_win_over_auto_captions(env):
+    e = env()
+    client = FakeYtDlp(["v1"], subs={"v1": {"manual": MANUAL, "auto": AUTO}})
+    e.go(client)
+    assert ("subs", "v1", "auto") not in client.calls
+    sent = stdin_of(e)
+    assert "maker-checker loop" in sent  # manual text reached the rater
+    assert "harness talk" not in sent  # auto text did not
+    assert (e.data / "transcripts" / "youtube-v1.txt").read_text().startswith("[00:01] Hello and welcome.")
+
+
+def test_auto_captions_are_the_fallback_when_there_are_no_manual_subtitles(env):
+    e = env()
+    client = FakeYtDlp(["v1"], subs={"v1": {"auto": AUTO}})
+    e.go(client)
+    assert [c for c in client.calls if c[0] == "subs"] == [("subs", "v1", "manual"), ("subs", "v1", "auto")]
+    assert "[00:03] today we look at evals" in stdin_of(e)
+    assert "[00:03] today we look at evals" in (e.data / "transcripts" / "youtube-v1.txt").read_text()
+
+
+def test_no_captions_falls_back_to_metadata_only_and_the_note_says_so(env):
+    e = env()
+    result = e.go(FakeYtDlp(["v1"]))
+    assert result.sources["youtube"]["status"] == "ok"
+    [note] = e.notes()
+    text = note.read_text()
+    assert "Metadata only (no captions)" in text
+    assert "metadata-only" in text.split("---")[1]  # a tag in the frontmatter
+    assert "No captions available" in stdin_of(e)
+    assert not (e.data / "transcripts").exists()
+
+
+def test_a_video_that_fails_is_skipped_logged_and_retried_but_the_others_are_done(env):
+    e = env()
+    result = e.go(FakeYtDlp(["good1", "bad", "good2"], fail_info={"bad"},
+                            subs={"good1": {"manual": MANUAL}, "good2": {"manual": MANUAL}}))
+    entry = result.sources["youtube"]
+    assert entry["status"] == "failed"
+    assert [i["id"] for i in entry["items"]] == ["good1", "good2"]
+    assert [n.name for n in e.notes()] == ["youtube-good1.md", "youtube-good2.md"]
+    processed = json.loads((e.data / "state" / "processed.json").read_text())["youtube"]
+    assert "bad" not in processed
+    # next run: only the failed one is looked at again, and it now works
+    client = FakeYtDlp(["good1", "bad", "good2"], subs={"bad": {"manual": MANUAL}})
+    again = e.go(client)
+    assert again.sources["youtube"]["status"] == "ok"
+    assert [i["id"] for i in again.sources["youtube"]["items"]] == ["bad"]
+    assert [c for c in client.calls if c[0] == "info"] == [("info", "bad")]
+
+
+def test_a_video_the_summarizer_cannot_rate_is_not_marked_processed(env):
+    e = env(claude_replies=["not json at all"])
+    result = e.go(FakeYtDlp(["v1"], subs={"v1": {"manual": MANUAL}}))
+    assert result.sources["youtube"]["status"] == "failed"
+    assert e.notes() == []
+    processed = e.data / "state" / "processed.json"
+    assert not processed.exists() or "v1" not in json.loads(processed.read_text()).get("youtube", [])
+
+
+def test_an_unconfigured_playlist_reports_not_configured_and_does_not_touch_yt_dlp(env):
+    e = env()
+    e.cfg.write_text(e.cfg.read_text().replace('playlist_url = "https://youtube.com/playlist?list=PL1"', 'playlist_url = ""'))
+    client = FakeYtDlp(["v1"])
+    result = e.go(client)
+    assert result.sources["youtube"] == {"status": "not configured", "items": []}
+    assert client.calls == []
+
+
+def test_a_playlist_listing_failure_fails_only_this_source(env):
+    e = env()
+    result = e.go(FakeYtDlp(fail_playlist=True))
+    assert result.sources["youtube"]["status"] == "failed"
+    assert "playlist unavailable" in result.sources["youtube"]["error"]
+
+
+def test_the_first_run_handles_only_the_ten_newest_and_later_runs_handle_all_new(env):
+    e = env()
+    ids = [f"v{i:02d}" for i in range(12)]  # newest first
+    subs = {i: {"manual": MANUAL} for i in ids + ["w1", "w2", "w3"]}
+    first = e.go(FakeYtDlp(ids, subs=subs))
+    assert [i["id"] for i in first.sources["youtube"]["items"]] == ids[:10]
+    assert len(e.notes()) == 10
+    later = e.go(FakeYtDlp(["w1", "w2", "w3", *ids], subs=subs))  # the 2 old ones stay skipped
+    assert [i["id"] for i in later.sources["youtube"]["items"]] == ["w1", "w2", "w3"]
+
+
+def test_a_rerun_with_the_same_playlist_finds_nothing_new(env):
+    e = env()
+    e.go(FakeYtDlp(["v1", "v2"], subs={"v1": {"manual": MANUAL}, "v2": {"manual": MANUAL}}))
+    calls = e.claude.calls
+    client = FakeYtDlp(["v1", "v2"])
+    again = e.go(client)
+    assert again.sources["youtube"]["items"] == []
+    assert again.sources["youtube"]["status"] == "ok"
+    assert [c[0] for c in client.calls] == ["playlist"]
+    assert e.claude.calls == calls
+
+
+def test_notes_carry_no_transcript_text_beyond_short_quotes(env):
+    words = [f"zq{i}word" for i in range(120)]
+    transcript_vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:09.000\n" + " ".join(words) + "\n"
+    copied = " ".join(words[:60])
+    e = env(claude_replies=[rating_reply(takeaways=[copied] + ["Own words."] * 5,
+                                         quotes=[" ".join(words[:10])])])
+    e.go(FakeYtDlp(["v1"], subs={"v1": {"manual": transcript_vtt}}))
+    [note] = e.notes()
+    longest = max((len(m.group(0).split()) for m in re.finditer(r"(?:zq\d+word ?)+", note.read_text())), default=0)
+    assert longest <= 40
+    assert "zq100word" not in note.read_text()
+    assert "zq100word" in (e.data / "transcripts" / "youtube-v1.txt").read_text()
+    assert not list((e.out).rglob("*.txt"))  # no transcript file anywhere in the output tree
