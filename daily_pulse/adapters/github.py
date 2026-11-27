@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from daily_pulse.adapters import registry
 from daily_pulse.adapters.base import AdapterContext, SourceAdapter
 from daily_pulse.models import Item
+from daily_pulse.state import atomic_write_json
 
 log = logging.getLogger("daily_pulse")
 
@@ -131,6 +132,7 @@ class GitHubAdapter(SourceAdapter):
         now = self._now(ctx)
         self._exhausted = ""
         self.last_run = {"degraded": False, "reason": ""}
+        self._stars = self._load_stars(ctx)
         items: list[Item] = []
         stages = [lambda: self._rising(ctx, now, int(cfg.get("rising_days", 7)))]
         stages += [lambda a=a: self._account(ctx, now, a) for a in cfg.get("watch_accounts", [])]
@@ -145,8 +147,28 @@ class GitHubAdapter(SourceAdapter):
         if self._exhausted and not self.last_run["degraded"]:
             log.warning("github: %s; remaining requests skipped", self._exhausted)
             self.last_run = {"degraded": True, "reason": self._exhausted}
+        self._save_stars(ctx)
         items.sort(key=lambda i: i.published, reverse=True)
         return items
+
+    # -- star baseline (local state: star counts as of the last run) -------------------------
+
+    def _stars_path(self, ctx):
+        return ctx.data_dir / "state" / "github.json" if ctx.data_dir else None
+
+    def _load_stars(self, ctx) -> dict:
+        path = self._stars_path(ctx)
+        try:
+            data = json.loads(path.read_text()) if path else {}
+            stars = data.get("stars", {}) if isinstance(data, dict) else {}
+            return {k: v for k, v in stars.items() if isinstance(v, int)}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_stars(self, ctx) -> None:
+        path = self._stars_path(ctx)
+        if path and ctx.persist and self._stars:
+            atomic_write_json(path, {"stars": self._stars})
 
     def fetch_details(self, item: Item, ctx: AdapterContext) -> Item:
         return item
@@ -188,6 +210,9 @@ class GitHubAdapter(SourceAdapter):
             if r.get("fork"):
                 continue
             created, pushed = _parse(r["created_at"]), _parse(r["pushed_at"])
+            stars_item = self._star_activity(ctx, r, now)
+            if stars_item:
+                items.append(stars_item)
             if now - created <= timedelta(days=lookback):
                 items.append(self._repo_item("repo", r, now, r["created_at"]))
                 continue
@@ -203,6 +228,19 @@ class GitHubAdapter(SourceAdapter):
                 item.id = f"push:{r['full_name']}:{day}"
                 items.append(item)
         return items
+
+    def _star_activity(self, ctx, r, now) -> Item | None:
+        """A notable star gain since the last run. The first sighting only sets the baseline."""
+        name, stars = r["full_name"], r.get("stargazers_count", 0)
+        before = self._stars.get(name)
+        self._stars[name] = stars
+        gained = stars - before if before is not None else 0
+        if gained < int(ctx.config.get("star_delta", 50)):
+            return None
+        item = self._repo_item("stars", r, now, now.isoformat().replace("+00:00", "Z"))
+        item.id = f"stars:{name}:{now.date().isoformat()}"
+        item.metrics["stars_gained"] = gained
+        return item
 
     def _releases(self, ctx, now, full_name) -> list[Item]:
         lookback = int(ctx.config.get("lookback_days", 7))

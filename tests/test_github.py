@@ -203,3 +203,53 @@ def test_without_fixtures_the_adapter_uses_the_real_transport(monkeypatch, make_
     assert main(["run", "--config", str(cfg), "--out", str(out), "--date", "2026-01-15"]) == 0
     assert seen[0].full_url.startswith("https://api.github.com/search/repositories?")
     assert "created%3A%3E2026-01-08" in seen[0].full_url
+
+
+# -- star activity since the last run -------------------------------------------------------
+
+def set_stars(fixtures, full_name, stars):
+    p = fixtures / "github" / "responses.json"
+    data = json.loads(p.read_text())
+    for r in data["/users/alice/repos"]["body"]:
+        if r["full_name"] == full_name:
+            r["stargazers_count"] = stars
+    p.write_text(json.dumps(data))
+
+
+def test_notable_star_growth_since_last_run_is_an_item(make_env, fixtures_dir):
+    run(make_env, fixtures_dir)  # baseline: alice/proj at 1200
+    set_stars(fixtures_dir, "alice/proj", 1300)
+    _, res = run(make_env, fixtures_dir)
+    items = items_by_id(res)
+    assert list(items) == ["stars:alice/proj:2026-01-15"]
+    assert items["stars:alice/proj:2026-01-15"]["metrics"]["stars_gained"] == 100
+    # and it is not repeated once the new count is the baseline
+    _, res = run(make_env, fixtures_dir)
+    assert res["sources"]["github"]["items"] == []
+
+
+def test_small_star_growth_is_not_notable(make_env, fixtures_dir):
+    run(make_env, fixtures_dir)
+    set_stars(fixtures_dir, "alice/proj", 1210)
+    _, res = run(make_env, fixtures_dir)
+    assert res["sources"]["github"]["items"] == []
+
+
+def test_dry_run_does_not_move_the_star_baseline(make_env, fixtures_dir):
+    cfg, data, out = make_env(sources=(), extra=GITHUB_CFG)
+    args = ["run", "--config", str(cfg), "--fixtures", str(fixtures_dir), "--out", str(out),
+            "--date", "2026-01-15"]
+    assert main(args + ["--dry-run"]) == 0
+    assert not list(data.rglob("github*.json"))
+
+
+# -- config ---------------------------------------------------------------------------------
+
+def test_shipped_config_watches_the_seed_handles_and_oh_my_pi():
+    import tomllib
+    from pathlib import Path
+    cfg = tomllib.loads((Path(__file__).parent.parent / "config" / "daily-pulse.toml").read_text())
+    gh = cfg["sources"]["github"]
+    assert {"karpathy", "mattpocock", "can1357", "simonw", "hamelsmu", "shreyashankar", "jxnl",
+            "eugeneyan", "hwchase17", "anthropics", "langchain-ai"} <= set(gh["watch_accounts"])
+    assert "can1357/oh-my-pi" in gh["watch_repos"]
