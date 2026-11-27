@@ -134,12 +134,12 @@ def test_every_source_is_run_and_youtube_reaches_notes_digest_and_site(pipeline)
     digest = (pipeline.out / "digests" / f"{DATE}.md").read_text()
     assert VIDEOS["vid1"] in digest
     assert "newrepo/agent-evals" in digest
-    assert "Reel by saver (S1)" in digest
+    assert "saved reel one" in digest
     assert "deferred" in digest.lower()  # the digest says X is deferred
     assert (pipeline.out / "digests" / f"{DATE}.html").read_text().startswith(("<!", "<html", "<table", "<div"))
     index = (pipeline.site / "index.html").read_text()
     assert VIDEOS["vid2"] in index
-    assert "newrepo/agent-evals" in index and "Reel by saver (S1)" in index
+    assert "newrepo/agent-evals" in index and "saved reel one" in index
     assert (pipeline.site / "notes" / DATE / "youtube-vid1.html").exists()
     assert (pipeline.site / "archive" / "index.html").exists()
 

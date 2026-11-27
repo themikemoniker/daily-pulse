@@ -16,11 +16,28 @@ DEFAULT_ENV = "IG_CLI_CMD"
 KINDS = ("saved", "liked")
 EXCERPT_WORDS = 25
 TIMEOUT = 120
+TITLE_CHARS = 80  # a reel's title is its caption's first line, cut to this
+DEFAULT_LIMIT = 20  # reels per run, saved first
+MAX_HASHTAGS = 5
 
 
 def _excerpt(caption: str) -> str:
     words = caption.split()
     return " ".join(words[:EXCERPT_WORDS]) + (" …" if len(words) > EXCERPT_WORDS else "")
+
+
+def title_from(caption: str, author: str, code: str) -> str:
+    """The caption's first line (at most TITLE_CHARS), else "Reel by <author> (<code>)". A real title
+    gives the quality gate's title rules and the rater something to work with."""
+    lines = [ln.strip() for ln in (caption or "").splitlines() if ln.strip()]
+    first = " ".join(lines[0].split()) if lines else ""
+    if first:
+        return first if len(first) <= TITLE_CHARS else first[: TITLE_CHARS - 1].rstrip() + "…"
+    return f"Reel by {author or 'unknown'} ({code})"
+
+
+def _count(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def parse_entries(text: str) -> list[dict]:
@@ -79,8 +96,14 @@ class InstagramAdapter(SourceAdapter):
         if fixture is not None:
             return fixture.read_text(encoding="utf-8")
         argv = self._command(ctx) + [str(a) for a in ctx.config.get("args", [])]
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=TIMEOUT,
-                              stdin=subprocess.DEVNULL)
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=TIMEOUT,
+                                  stdin=subprocess.DEVNULL)
+        except FileNotFoundError:  # name the program only: the rest of the command may hold a token
+            raise RuntimeError(f"IG CLI not found: {os.path.basename(argv[0])} "
+                               f"(the command in ${ctx.config.get('cli_cmd_env', DEFAULT_ENV)})") from None
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"IG CLI could not run: {type(exc).__name__}") from None
         if proc.returncode != 0:
             raise RuntimeError(f"IG CLI exited {proc.returncode}: {proc.stderr.strip()[:200]}")
         return proc.stdout
@@ -97,10 +120,26 @@ class InstagramAdapter(SourceAdapter):
             seen.add(code)
             author = e.get("author") or ""
             self.captions[code] = e.get("caption") or ""
+            metrics = {"source": e["source"]}
+            for key, field in (("likes", "like_count"), ("comments", "comment_count")):
+                if _count(e.get(field)) is not None:  # optional: a malformed value is just left out
+                    metrics[key] = e[field]
+            tags = e.get("hashtags")
+            if isinstance(tags, list) and all(isinstance(t, str) for t in tags) and tags:
+                metrics["hashtags"] = [t.strip().lstrip("#")[:40] for t in tags[:MAX_HASHTAGS] if t.strip()]
             items.append(Item(source=self.name, id=code, url=e["url"],
-                              title=f"Reel by {author or 'unknown'} ({code})", author=author,
-                              published=e.get("timestamp") or "", metrics={"source": e["source"]}))
+                              title=title_from(e.get("caption") or "", author, code), author=author,
+                              published=e.get("timestamp") or "", metrics=metrics))
+            if len(items) >= self._limit(ctx):
+                break
         return items
+
+    @staticmethod
+    def _limit(ctx: AdapterContext) -> int:
+        limit = ctx.config.get("limit", DEFAULT_LIMIT)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError(f"[sources.instagram] limit must be a whole number, 1 or more, got {limit!r}")
+        return limit
 
     def fetch_details(self, item: Item, ctx: AdapterContext) -> Item:
         item.text = _excerpt(self.captions.get(item.id, ""))

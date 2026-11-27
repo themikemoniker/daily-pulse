@@ -212,3 +212,64 @@ def test_null_optional_fields_are_accepted_and_filtered_kinds_are_not_malformed(
     assert run(cfg, out, fixtures_dir) == 0
     assert [i["id"] for i in result(out)["sources"]["instagram"]["items"]] == ["S1"]
     assert "malformed" not in (data / "logs" / "run-2026-01-15.log").read_text().lower()
+
+
+# --- Instagram ports from the working digest script ---
+
+def _ig(entries, **cfg):
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from daily_pulse.adapters.base import AdapterContext
+    from daily_pulse.adapters.instagram import InstagramAdapter
+
+    d = Path(tempfile.mkdtemp())
+    (d / "instagram").mkdir()
+    (d / "instagram" / "items.json").write_text(json.dumps(entries))
+    return InstagramAdapter().list_new(AdapterContext(config=cfg, fixtures_dir=d, date="2026-01-15"))
+
+
+def _entry(code, caption="", kind="saved", **extra):
+    return {"shortcode": code, "url": f"https://www.instagram.com/reel/{code}/", "source": kind,
+            "author": "maker", "caption": caption, "timestamp": "2026-01-14T10:00:00Z", **extra}
+
+
+def test_a_reel_is_titled_by_its_captions_first_line_cut_to_80_characters():
+    items = _ig([_entry("A1", "How I wire a checker agent\n\n#agents #evals"), _entry("A2", "x" * 200),
+                 _entry("A3", ""), _entry("A4", "   \n  ")])
+    titles = {i.id: i.title for i in items}
+    assert titles["A1"] == "How I wire a checker agent"
+    assert len(titles["A2"]) == 80 and titles["A2"].endswith("…")
+    assert titles["A3"] == "Reel by maker (A3)" and titles["A4"] == "Reel by maker (A4)"
+
+
+def test_likes_comments_and_hashtags_are_optional_metrics_and_bad_values_are_left_out():
+    items = _ig([_entry("A1", "c", like_count=120, comment_count=7, hashtags=["#evals", "agents"] + ["t"] * 9),
+                 _entry("A2", "c", like_count=-3, comment_count="many", hashtags="evals"), _entry("A3", "c")])
+    m = {i.id: i.metrics for i in items}
+    assert m["A1"]["likes"] == 120 and m["A1"]["comments"] == 7 and len(m["A1"]["hashtags"]) == 5
+    assert m["A1"]["hashtags"][:2] == ["evals", "agents"]
+    assert m["A2"] == {"source": "saved"} and m["A3"] == {"source": "saved"}
+
+
+def test_the_per_run_limit_keeps_saved_reels_first():
+    entries = [_entry(f"L{i}", kind="liked") for i in range(3)] + [_entry(f"S{i}") for i in range(3)]
+    assert [i.id for i in _ig(entries, limit=4)] == ["S0", "S1", "S2", "L0"]
+    assert len(_ig(entries)) == 6  # the default is generous
+
+
+@pytest.mark.parametrize("limit", [0, -1, "5", True, 2.5])
+def test_a_malformed_limit_is_rejected_with_a_message(limit):
+    with pytest.raises(ValueError, match=r"sources\.instagram"):
+        _ig([_entry("A1")], limit=limit)
+
+
+def test_a_missing_ig_command_names_the_program_and_never_its_arguments(monkeypatch):
+    from daily_pulse.adapters.base import AdapterContext
+    from daily_pulse.adapters.instagram import InstagramAdapter
+
+    monkeypatch.setenv("IG_CLI_CMD", "/nonexistent/ig-cli --token SECRET123")
+    with pytest.raises(RuntimeError, match="IG CLI not found: ig-cli") as err:
+        InstagramAdapter().list_new(AdapterContext(config={}, date="2026-01-15"))
+    assert "SECRET123" not in str(err.value)

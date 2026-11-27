@@ -23,6 +23,12 @@ The command must print a JSON list to stdout and exit 0:
 
 - `shortcode`, `url` (strings, required), `source` (`"saved"` or `"liked"`, required).
 - `author`, `caption`, `timestamp` (strings, optional).
+- `like_count`, `comment_count` (whole numbers, 0 or more, optional) and `hashtags` (list of strings, optional;
+  the first 5 are kept): shown to the rater as metrics. A malformed optional value is left out, the entry is kept.
+- `[sources.instagram] limit` (whole number, default 20): reels taken per run, saved first, then liked.
+- The reel's title is its caption's first line (cut to 80 characters); with no caption it is
+  `Reel by <author> (<shortcode>)`.
+- A command that cannot be found fails only this module, naming the program (never its arguments, which may hold a token).
 
 ## Behaviour
 

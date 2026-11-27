@@ -42,13 +42,23 @@ diamond rule. A one-line "velocity is a signal, never the score" is added to the
 - GitHub relevance logic (`topic_score`, `velocity_of`, `is_diamond`, `format_repo_for_rating`,
   `parse_batch_ratings`, `rate_repos_batch`, the rating pool): ported into `daily_pulse/repo_rating.py` and the
   GitHub adapter. Adapted: the summarizer call goes through the repo's tool-less `claude -p` wrapper so the
-  per-run call cap and the timeout apply. With no summarizer an item is left unrated and retried, never given a
-  guessed score.
+  per-run call cap and the timeout apply, the repo list in the prompt is marked as untrusted data, and a
+  description is cut to 300 characters. With no summarizer an item is left unrated and retried, never given a
+  guessed score. The batch runs in a new `SourceAdapter.rank_new` hook on NEW items only (the script rated on
+  every run), so a day with nothing new makes no call, and a repo rated below `min_relevance` (default 4) is a
+  logged drop, not a silent one.
+- GitHub diamond: relevance 7+ and 50+ stars a day, as an addition to the repo's rating 9+ and under 48 hours.
+  GitHub notes now carry `star_velocity`. The repo's velocity counts a repo younger than a day as one day (the
+  script floors the age at 0.1 day), so the threshold is harder to reach for brand-new repos on purpose.
 - Prompt wording: say so when a video is too basic or unverified hype, never invent numbers or timestamps,
   say what would confirm a diamond, velocity is never the score.
 - Instagram: caption-first-line title, a clear error when the configured command is missing, a `limit`,
   likes, comments and hashtags as metrics.
-- X: opt-in adapter, off unless `paid_api_approved = true` and the token variable is set, fixtures-only tests.
+- X: opt-in adapter (`adapters/x.py`), off unless `paid_api_approved = true`, `usernames` is non-empty and the
+  token variable is set, with the script's cost caps and username-to-id cache. Nothing in this branch has ever
+  called the real X API: tests use recorded fixtures and fail on any `urlopen`. Not ported: its keyword
+  heuristic rating, the personal keyword list and the full-text note body. It also stops on a 401 so a rejected
+  token cannot look like an empty successful run.
 
 ## Not ported, and why
 
