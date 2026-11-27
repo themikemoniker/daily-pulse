@@ -45,3 +45,57 @@ def test_quoted_spans_in_free_text_draw_on_the_shared_budget():
     quoted = [len(q.split()) for q in re.findall(r'"([^"]*)"', first + " " + second)]
     assert sum(quoted) <= 10
     assert budget.used <= 10
+
+
+# --- review round: bypasses of the copy detector -------------------------------------------
+
+def _plain(n):
+    return " ".join(f"word{i}" for i in range(n))
+
+
+def test_curly_apostrophes_do_not_defeat_the_copy_guard():
+    ref = " ".join(f"don't{i} w{i}" for i in range(40))
+    copy = ref.replace("'", "’")
+    assert longest_copied_run(copy, ref) == 80
+    assert longest_copied_run(guard_text(copy, ref), ref) <= 40
+
+
+def test_markdown_emphasis_and_zero_width_chars_do_not_defeat_the_copy_guard():
+    copy = " ".join(f"_word{i}_" if i % 10 == 0 else f"wo​rd{i}" for i in range(60))
+    assert longest_copied_run(copy, _plain(80)) >= 60
+    assert longest_copied_run(guard_text(copy, _plain(80)), _plain(80)) <= 40
+
+
+def test_timestamps_inside_the_copy_do_not_break_the_run():
+    copy = " ".join((f"[00:{i:02d}] " if i % 10 == 0 else "") + f"word{i}" for i in range(60))
+    assert longest_copied_run(copy, _plain(80)) == 60
+
+
+def test_srt_and_vtt_markup_in_the_reference_does_not_break_the_run():
+    srt = "\n".join(f"{i}\n00:00:{i:02d},000 --> 00:00:{i+1:02d},000\nword{i}" for i in range(60))
+    assert longest_copied_run(_plain(60), srt) == 60
+    vtt = " ".join(f"<00:00:01.200><c> word{i}</c>" for i in range(60))
+    assert longest_copied_run(_plain(60), vtt) == 60
+
+
+def test_quoted_words_are_counted_as_words_not_whitespace_tokens():
+    hyphenated = " ".join("-".join(f"k{j}p{i}" for i in range(10)) for j in range(25))  # 250 words
+    budget = QuoteBudget()
+    out = budget.fit(hyphenated)
+    assert len(re.findall(r"\w+", out)) <= 49
+    text = guard_text(f'He says "{hyphenated}".', "", QuoteBudget())
+    assert len(re.findall(r"\w+", text)) <= 49 + 3
+
+
+def test_guillemet_and_low_double_quotes_count_as_quoted_spans():
+    spans = guard_text(f"A «{_plain(60)}» and B „{_plain(60)}“.", "", QuoteBudget())
+    assert len(re.findall(r"\bword\d+", spans)) <= 49
+
+
+def test_short_lifted_runs_spend_the_budget_too():
+    ref = _plain(500)
+    pieces = [" ".join(f"word{i}" for i in range(s, s + 9)) for s in range(0, 450, 10)]  # 9-word lifts
+    budget = QuoteBudget()
+    out = " / ".join(guard_text(p, ref, budget) for p in pieces)
+    from daily_pulse.quoteguard import copied_word_count
+    assert copied_word_count(out, ref, min_run=5) <= 49

@@ -20,9 +20,10 @@ from daily_pulse.quoteguard import MAX_COPY_RUN, QuoteBudget, guard_text, longes
 VIDEO_SOURCES = ("youtube",)
 MAX_TAKEAWAYS = 8
 
-_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_TIMESTAMP = re.compile(r"\d{1,2}(:\d{2}){1,2}")
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_TIMESTAMP = re.compile(r"[0-9]{1,2}(:[0-9]{2}){1,2}")
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
+MAX_STEM = 120  # keeps `<stem>-<hash>.md` far below filesystem name limits
 
 
 class NoteError(ValueError):
@@ -34,13 +35,13 @@ def _safe_name(source: str, item_id: str) -> str:
     short hash so two different ids never share a file."""
     stem = f"{source}-{item_id}"
     clean = _UNSAFE.sub("_", stem)
-    if clean != stem:
-        clean += "-" + hashlib.sha1(stem.encode()).hexdigest()[:8]
+    if clean != stem or len(clean) > MAX_STEM:
+        clean = clean[:MAX_STEM] + "-" + hashlib.sha1(stem.encode()).hexdigest()[:8]
     return clean
 
 
-def _one_line(text: str) -> str:
-    return " ".join(str(text).split())
+def _one_line(text) -> str:
+    return " ".join(("" if text is None else str(text)).split())
 
 
 def _fmt_duration(value) -> str:
@@ -55,52 +56,57 @@ def _frontmatter(pairs: list[tuple[str, object]]) -> str:
     lines = ["---"]
     for key, value in pairs:
         is_int = isinstance(value, int) and not isinstance(value, bool)
-        lines.append(f"{key}: {value if is_int else json.dumps(value, ensure_ascii=False)}")
+        lines.append(f"{key}: {value if is_int else json.dumps(value, ensure_ascii=False, default=str)}")
     return "\n".join(lines)
 
 
-def _validate(rating: Rating, date: str) -> None:
-    if not _DATE.fullmatch(date):
+def _validate(item: Item, rating: Rating, date: str) -> None:
+    if not isinstance(date, str) or not _DATE.fullmatch(date):
         raise NoteError(f"date must be YYYY-MM-DD, got {date!r}")
     if isinstance(rating.rating, bool) or not isinstance(rating.rating, int) or not 1 <= rating.rating <= 10:
         raise NoteError(f"rating must be an integer 1-10, got {rating.rating!r}")
     if rating.verdict not in VERDICTS:
         raise NoteError(f"verdict must be one of {', '.join(VERDICTS)}, got {rating.verdict!r}")
+    if not _one_line(item.title):
+        raise NoteError(f"{item.source}-{item.id}: item has no title")
     if not _one_line(rating.reason):
         raise NoteError("rating needs a one-line reason")
+    if item.source not in VIDEO_SOURCES and not _one_line(rating.summary):
+        raise NoteError(f"{item.source}-{item.id}: a {item.source} note needs a summary")
     for beat in rating.beats:
         if not _TIMESTAMP.fullmatch(str(beat.timestamp)):
             raise NoteError(f"beat timestamp must look like 05:30 or 1:05:30, got {beat.timestamp!r}")
 
 
-def _video(item: Item, rating: Rating, g) -> tuple[list, list]:
+def _video(item: Item, rating: Rating, g, head: dict) -> tuple[list, list]:
+    metrics = item.metrics or {}
     front = [
-        ("title", _one_line(item.title)),
-        ("channel", _one_line(item.author)),
+        ("title", head["title"]),
+        ("channel", head["author"]),
         ("video_id", item.id),
         ("url", item.url),
         ("published", item.published),
-        ("duration", _fmt_duration(item.metrics.get("duration", ""))),
-        ("views", item.metrics.get("views", 0)),
+        ("duration", _fmt_duration(metrics.get("duration", ""))),
+        ("views", metrics.get("views", 0)),
         ("rating", rating.rating),
-        ("tags", [_one_line(t) for t in rating.tags]),
+        ("tags", head["tags"]),
     ]
     body = ["## Key takeaways", *[f"- {g(t)}" for t in rating.takeaways[:MAX_TAKEAWAYS]], "",
             "## The argument, beat by beat", *[f"- [{b.timestamp}] {g(b.text)}" for b in rating.beats]]
     return front, body
 
 
-def _generic(item: Item, rating: Rating, g) -> tuple[list, list]:
+def _generic(item: Item, rating: Rating, g, head: dict) -> tuple[list, list]:
     front = [
-        ("title", _one_line(item.title)),
+        ("title", head["title"]),
         ("source", item.source),
         ("id", item.id),
         ("url", item.url),
-        ("author", _one_line(item.author)),
+        ("author", head["author"]),
         ("published", item.published),
         ("rating", rating.rating),
         ("verdict", rating.verdict),
-        ("tags", [_one_line(t) for t in rating.tags]),
+        ("tags", head["tags"]),
     ]
     return front, ["## Summary", "", g(rating.summary)]
 
@@ -108,7 +114,7 @@ def _generic(item: Item, rating: Rating, g) -> tuple[list, list]:
 def render_note(item: Item, rating: Rating, date: str, transcript: str = "") -> str:
     """The note's text. `transcript` (and the item's own excerpt) is only used to check that
     nothing is copied from it."""
-    _validate(rating, date)
+    _validate(item, rating, date)
     reference = "\n".join(part for part in (transcript, item.text) if part)
     budget = QuoteBudget()
     # Explicit quotes spend the budget first, then quoted spans inside the free text.
@@ -117,8 +123,16 @@ def render_note(item: Item, rating: Rating, date: str, transcript: str = "") -> 
     def g(text: str) -> str:
         return guard_text(_one_line(text), reference, budget)
 
-    front, middle = (_video if item.source in VIDEO_SOURCES else _generic)(item, rating, g)
-    body = [f"# {_one_line(item.title)}", "", *middle, ""]
+    # Title, author and tags are free text too: guard them once and reuse the result.
+    # The title appears twice (frontmatter and heading), so it may spend only half the remainder
+    # and is charged double.
+    title_budget = QuoteBudget(limit=(budget.limit - budget.used) // 2)
+    head = {"title": guard_text(_one_line(item.title), reference, title_budget)}
+    budget.used += 2 * title_budget.used
+    head["author"] = g(item.author)
+    head["tags"] = [g(t) for t in rating.tags or []]
+    front, middle = (_video if item.source in VIDEO_SOURCES else _generic)(item, rating, g, head)
+    body = [f"# {head['title']}", "", *middle, ""]
     if quotes:
         body += ["## Quotes", "", *[f"> {q}" for q in quotes], ""]
     body += ["## Rating", "", f"**{rating.rating}/10** — {g(rating.reason)}", "",
@@ -131,12 +145,13 @@ def render_note(item: Item, rating: Rating, date: str, transcript: str = "") -> 
 
 def _write_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.read_text() == text:
+    if path.exists() and path.read_text(encoding="utf-8") == text:
         return
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+        os.chmod(tmp, 0o644)  # mkstemp makes it 0600; notes are published files
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

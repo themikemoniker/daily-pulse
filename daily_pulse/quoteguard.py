@@ -5,26 +5,51 @@ Two rules, enforced in code:
   copied run is cut down to a SNIPPET_WORDS snippet followed by an ellipsis;
 - the words inside quotation marks (explicit quotes and quoted spans in free text) and any
   lifted run of MIN_COPY_RUN+ words in free text share one per-item budget that stays under 50.
+
+Words are compared after Unicode NFKC normalisation, ignoring case, curly-vs-straight
+apostrophes, zero-width characters, markdown underscores, and caption markup (timestamps,
+inline tags, SRT cue numbers), so cosmetic changes do not hide a copy.
 """
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 MAX_COPY_RUN = 40  # more than this many consecutive matching words is rejected
 SNIPPET_WORDS = 20  # a copied run is truncated to this many words
 MAX_QUOTED_WORDS = 49  # total quoted words per item
 MAX_QUOTE_WORDS = 25  # one explicit quote
-MIN_COPY_RUN = 12  # a matching run this long counts as lifted text and spends the budget
+MIN_COPY_RUN = 8  # a matching run this long counts as lifted text and spends the budget
 
-_WORD = re.compile(r"\w+(?:'\w+)*")
-_TIMESTAMP = re.compile(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\]?")
-_QUOTED = re.compile(r'"([^"]*)"|“([^”]*)”')
+_APOS = "'’‘ʼ`"
+_WORD = re.compile(rf"[^\W_]+(?:[{_APOS}][^\W_]+)*")
+# Caption markup that sits between words: [00:10] / 00:00:01.200 timestamps, <c> tags, SRT cue numbers.
+_MARKUP = re.compile(r"<[^>]*>|\[?\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\]?|^[ \t]*\d+[ \t]*$", re.M)
+_ZERO_WIDTH = re.compile("[​-‏⁠﻿­]")
+_QUOTED = re.compile(r'"([^"]*)"|“([^”]*)”|«([^»]*)»|„([^“”]*)[“”]')
 ELLIPSIS = "…"
 
 
+def _clean(text: str) -> str:
+    return _ZERO_WIDTH.sub("", unicodedata.normalize("NFKC", text))
+
+
+def _tokens(text: str) -> list[tuple[int, int, str]]:
+    """(start, end, normalised word) for each word of cleaned `text`, skipping caption markup."""
+    skip = [m.span() for m in _MARKUP.finditer(text)]
+    out, k = [], 0
+    for m in _WORD.finditer(text):
+        while k < len(skip) and skip[k][1] <= m.start():
+            k += 1
+        if k < len(skip) and skip[k][0] <= m.start() < skip[k][1]:
+            continue
+        out.append((m.start(), m.end(), re.sub(f"[{_APOS}]", "'", m.group().lower())))
+    return out
+
+
 def _ref_words(reference: str) -> list[str]:
-    return [w.lower() for w in _WORD.findall(_TIMESTAMP.sub(" ", reference))]
+    return [t[2] for t in _tokens(_clean(reference))]
 
 
 def _index(ref: list[str]) -> dict[str, list[int]]:
@@ -44,12 +69,38 @@ def _match_len(words: list[str], i: int, ref: list[str], index: dict[str, list[i
     return best
 
 
+def word_count(text: str) -> int:
+    return len(_WORD.findall(_clean(text)))
+
+
+def _first_words(text: str, n: int) -> str:
+    """The prefix of `text` holding its first n words (text is returned whole if shorter)."""
+    spans = [m.end() for m in _WORD.finditer(text)]
+    return text if len(spans) <= n else text[: spans[n - 1]] if n else ""
+
+
 def longest_copied_run(text: str, reference: str) -> int:
     """Length in words of the longest run of `text` that appears verbatim in `reference`."""
     ref = _ref_words(reference)
     index = _index(ref)
-    words = [w.lower() for w in _WORD.findall(text)]
+    words = [t[2] for t in _tokens(_clean(text))]
     return max((_match_len(words, i, ref, index) for i in range(len(words))), default=0)
+
+
+def copied_word_count(text: str, reference: str, min_run: int = MIN_COPY_RUN) -> int:
+    """Words of `text` that sit inside a verbatim run of at least `min_run` words of `reference`."""
+    ref = _ref_words(reference)
+    index = _index(ref)
+    words = [t[2] for t in _tokens(_clean(text))]
+    covered, i = 0, 0
+    while i < len(words):
+        run = _match_len(words, i, ref, index)
+        if run >= min_run:
+            covered += run
+            i += run
+        else:
+            i += 1
+    return covered
 
 
 @dataclass
@@ -66,27 +117,12 @@ class QuoteBudget:
 
     def fit(self, quote: str, per_quote: int = MAX_QUOTE_WORDS) -> str:
         """Truncate one explicit quote to its cap and the remaining budget; "" if none left."""
-        words = quote.split()
-        granted = self.take(min(len(words), per_quote))
+        quote = _clean(quote)
+        total = word_count(quote)
+        granted = self.take(min(total, per_quote))
         if granted == 0:
             return ""
-        return " ".join(words[:granted]) + (ELLIPSIS if granted < len(words) else "")
-
-
-def copied_word_count(text: str, reference: str, min_run: int = MIN_COPY_RUN) -> int:
-    """Words of `text` that sit inside a verbatim run of at least `min_run` words of `reference`."""
-    ref = _ref_words(reference)
-    index = _index(ref)
-    words = [w.lower() for w in _WORD.findall(text)]
-    covered, i = 0, 0
-    while i < len(words):
-        run = _match_len(words, i, ref, index)
-        if run >= min_run:
-            covered += run
-            i += run
-        else:
-            i += 1
-    return covered
+        return _first_words(quote, granted) + (ELLIPSIS if granted < total else "")
 
 
 def _truncate_copied_runs(text: str, reference: str, budget: QuoteBudget | None) -> str:
@@ -94,7 +130,7 @@ def _truncate_copied_runs(text: str, reference: str, budget: QuoteBudget | None)
     if not ref:
         return text
     index = _index(ref)
-    spans = [(m.start(), m.end(), m.group().lower()) for m in _WORD.finditer(text)]
+    spans = _tokens(text)
     words = [s[2] for s in spans]
     out, pos, i = [], 0, 0
     while i < len(words):
@@ -116,20 +152,22 @@ def _truncate_copied_runs(text: str, reference: str, budget: QuoteBudget | None)
 
 def _limit_quoted_spans(text: str, budget: QuoteBudget) -> str:
     def repl(m: re.Match) -> str:
-        inner = m.group(1) if m.group(1) is not None else m.group(2)
-        words = inner.split()
-        granted = budget.take(len(words))
-        if granted == len(words):
+        inner = next(g for g in m.groups() if g is not None)
+        total = word_count(inner)
+        granted = budget.take(total)
+        if granted == total:
             return m.group(0)
         if granted == 0:
             return ELLIPSIS
-        return f'"{" ".join(words[:granted])}{ELLIPSIS}"'
+        whole = m.group(0)
+        return f"{whole[0]}{_first_words(inner, granted)}{ELLIPSIS}{whole[-1]}"
 
     return _QUOTED.sub(repl, text)
 
 
 def guard_text(text: str, reference: str = "", budget: QuoteBudget | None = None) -> str:
     """Apply both rules to one free-text field of a note."""
+    text = _clean(text)
     text = _truncate_copied_runs(text, reference, budget)
     if budget is not None:
         text = _limit_quoted_spans(text, budget)

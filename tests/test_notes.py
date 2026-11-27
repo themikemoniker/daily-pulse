@@ -194,3 +194,63 @@ def test_total_words_lifted_from_the_transcript_stay_under_fifty_across_all_fiel
     )
     text = write_note(video_item(), rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT).read_text()
     assert copied_word_count(text, TRANSCRIPT) <= 49
+
+
+# --- review round ------------------------------------------------------------------------------
+
+def test_title_author_and_tags_are_guarded_and_share_the_budget(tmp_path):
+    from daily_pulse.quoteguard import copied_word_count
+    item = video_item()
+    item.title = " ".join(f"word{i}" for i in range(0, 40))
+    item.author = " ".join(f"word{i}" for i in range(40, 80))
+    rating = video_rating(tags=[" ".join(f"word{i}" for i in range(80, 110))])
+    text = write_note(item, rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT).read_text()
+    assert copied_word_count(text, TRANSCRIPT) <= 49
+
+
+def test_quoted_title_cannot_smuggle_sixty_quoted_words(tmp_path):
+    item = video_item()
+    item.title = 'Say "' + " ".join(f"x{i}" for i in range(60)) + '"'
+    text = write_note(item, video_rating(), tmp_path / "notes", DATE).read_text()
+    assert quoted_words(text) <= 49
+
+
+def test_notes_are_utf8_and_world_readable(tmp_path):
+    item = video_item()
+    item.title = "Café — évals"
+    path = write_note(item, video_rating(), tmp_path / "notes", DATE)
+    assert "Café — évals" in path.read_bytes().decode("utf-8")
+    assert path.stat().st_mode & 0o644 == 0o644
+
+
+@pytest.mark.parametrize("make", [
+    lambda i, r: setattr(r, "reason", None),
+    lambda i, r: setattr(r, "summary", ""),
+    lambda i, r: setattr(r, "summary", None),
+    lambda i, r: setattr(i, "title", None),
+])
+def test_missing_text_is_refused_not_rendered_as_none(tmp_path, make):
+    item, rating = generic_item("github"), generic_rating()
+    make(item, rating)
+    with pytest.raises(NoteError):
+        write_note(item, rating, tmp_path / "notes", DATE)
+
+
+def test_missing_metrics_and_tags_do_not_crash(tmp_path):
+    item = video_item()
+    item.metrics = None
+    text = write_note(item, video_rating(tags=None), tmp_path / "notes", DATE).read_text()
+    assert "None" not in text
+
+
+def test_very_long_ids_still_get_a_valid_filename(tmp_path):
+    item = video_item()
+    item.id = "x" * 400
+    path = write_note(item, video_rating(), tmp_path / "notes", DATE)
+    assert path.exists() and len(path.name) < 200
+    assert write_note(item, video_rating(), tmp_path / "notes", DATE) == path
+
+
+def test_unicode_digit_dates_are_refused(tmp_path):
+    with pytest.raises(NoteError):
+        write_note(video_item(), video_rating(), tmp_path / "notes", "２０２６-01-15")
