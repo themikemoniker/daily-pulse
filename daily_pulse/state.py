@@ -46,3 +46,28 @@ class StateStore:
         if item_id not in ids:
             ids.append(item_id)
         _atomic_write_json(self._processed_path, self._processed)
+
+
+class FailureCounters:
+    """Per-module failure counters that persist across runs."""
+
+    def __init__(self, data_dir: Path):
+        self._path = Path(data_dir) / "state" / "failures.json"
+        self._counters: dict[str, dict] = _read_json(self._path)
+
+    def consecutive(self, module: str) -> int:
+        return self._counters.get(module, {}).get("consecutive", 0)
+
+    def record_failure(self, module: str, error: str) -> int:
+        entry = self._counters.setdefault(module, {"consecutive": 0, "total": 0})
+        entry["consecutive"] += 1
+        entry["total"] += 1
+        entry["last_error"] = error
+        _atomic_write_json(self._path, self._counters)
+        return entry["consecutive"]
+
+    def record_success(self, module: str) -> None:
+        entry = self._counters.get(module)
+        if entry and entry["consecutive"]:
+            entry["consecutive"] = 0
+            _atomic_write_json(self._path, self._counters)

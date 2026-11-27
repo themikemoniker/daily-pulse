@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -58,5 +59,8 @@ def make_env(tmp_path):
 
 
 @pytest.fixture
-def fixtures_dir():
-    return FIXTURES
+def fixtures_dir(tmp_path):
+    """A per-test copy of tests/fixtures, safe to add to."""
+    dest = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES, dest)
+    return dest

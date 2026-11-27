@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from datetime import date as _date
 from pathlib import Path
 
@@ -26,7 +27,18 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     config = load_config(args.config)
     date = args.date or _date.today().isoformat()
-    result = run_pipeline(config, date, args.fixtures)
+    log_dir = config.data_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_dir / f"run-{date}.log")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger = logging.getLogger("daily_pulse")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    try:
+        result = run_pipeline(config, date, args.fixtures)
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / f"run-{date}.json").write_text(json.dumps(result.to_dict(), indent=2))
     return 0
