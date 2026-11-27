@@ -3,7 +3,7 @@ against the actual note format; nothing here touches the network or a subprocess
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 
-from daily_pulse.digest import build_digest
+from daily_pulse.digest import build_digest, write_digest
 from daily_pulse.models import Item, Rating
 from daily_pulse.notes import write_note
 
@@ -274,3 +274,72 @@ def test_markdown_link_text_survives_brackets_in_titles(tmp_path):
     line = next(l for l in digest(notes).markdown.splitlines() if l.startswith("1. "))
 
     assert "[Why \\[evals\\] (still) matter](https://items.test/a_%28b%29)" in line
+
+
+def test_write_digest_creates_markdown_and_html_files(tmp_path):
+    notes, out = tmp_path / "notes", tmp_path / "digests"
+    add_note(notes, "r1", "A repo", 5)
+
+    md_path, html_path = write_digest(notes, out, DATE, sources={}, base_url=BASE, now=NOW)
+
+    assert md_path == out / f"{DATE}.md" and html_path == out / f"{DATE}.html"
+    built = digest(notes)
+    assert md_path.read_text(encoding="utf-8") == built.markdown
+    assert html_path.read_text(encoding="utf-8") == built.html
+
+
+def test_rerunning_for_the_same_date_gives_identical_output(tmp_path):
+    notes, out = tmp_path / "notes", tmp_path / "digests"
+    add_note(notes, "a", "Item a", 9, age_hours=5)
+    add_note(notes, "b", "Item b", 4)
+    sources = {"github": {"status": "ok", "items": [{}, {}]}, "x": {"status": "deferred: no route", "items": []}}
+
+    first = write_digest(notes, out, DATE, sources=sources, base_url=BASE, now=NOW)
+    before = [p.read_bytes() for p in first]
+    mtimes = [p.stat().st_mtime_ns for p in first]
+    second = write_digest(notes, out, DATE, sources=sources, base_url=BASE, now=NOW)
+
+    assert second == first
+    assert [p.read_bytes() for p in second] == before
+    assert [p.stat().st_mtime_ns for p in second] == mtimes  # unchanged content is not rewritten
+
+
+def test_default_reference_time_comes_from_the_date_not_the_clock(tmp_path):
+    notes = tmp_path / "notes"
+    # Published 40 hours before the end of 2026-01-15 UTC: a diamond today, and still on a rebuild next year.
+    item = Item(source="github", id="d", url="https://items.test/d", title="Dated gem",
+                published="2026-01-14T08:00:00Z")
+    write_note(item, Rating(rating=9, reason="r", verdict="watch", summary="s"), notes, DATE)
+
+    d = build_digest(notes, DATE, sources={}, base_url=BASE)  # no `now`
+
+    assert "Dated gem" in diamonds_md(d.markdown)
+    assert d == build_digest(notes, DATE, sources={}, base_url=BASE)
+
+
+def test_output_does_not_depend_on_the_order_notes_were_written(tmp_path):
+    specs = [("a", "Alpha", 6), ("b", "Beta", 6), ("c", "Gamma", 6), ("d", "Delta", 7)]
+    results = []
+    for name, ordering in (("one", specs), ("two", list(reversed(specs)))):
+        notes = tmp_path / name / "notes"
+        for item_id, title, rating in ordering:
+            add_note(notes, item_id, title, rating, age_hours=3)  # same age: ties all the way down
+        results.append(digest(notes))
+
+    assert results[0] == results[1]
+
+
+def test_digest_carries_no_quotes_or_transcript_text(tmp_path):
+    notes = tmp_path / "notes"
+    transcript = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+    item = Item(source="youtube", id="q", url="https://youtu.be/q", title="Quoted talk",
+                published=iso(NOW - timedelta(hours=2)), metrics={"duration": 60, "views": 1})
+    rating = Rating(rating=7, reason="Fine.", verdict="watch", takeaways=["One", "Two", "Three", "Four", "Five"],
+                    quotes=["alpha bravo charlie delta echo"], summary="")
+    write_note(item, rating, notes, DATE, transcript=transcript)
+    assert "alpha bravo" in (notes / DATE / "youtube-q.md").read_text()  # the note itself quotes it
+
+    d = digest(notes)
+
+    assert "alpha bravo" not in d.markdown and "alpha bravo" not in d.html
+    assert "Quoted talk" in d.markdown

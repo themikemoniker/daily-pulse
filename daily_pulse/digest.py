@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from daily_pulse.notes import _write_atomic
+
 DIAMOND_MIN_RATING = 9
 DIAMOND_MAX_AGE = timedelta(hours=48)  # strictly younger than this
 
@@ -259,3 +261,15 @@ def build_digest(notes_dir: Path, date: str, sources: dict | None = None,
         _render_markdown(date, entries, diamonds, statuses, base_url),
         _render_html(date, entries, diamonds, statuses, base_url),
     )
+
+
+def write_digest(notes_dir: Path, digests_dir: Path, date: str, sources: dict | None = None,
+                 base_url: str = "", now: datetime | None = None) -> tuple[Path, Path]:
+    """Write `<digests_dir>/<date>.md` and `.html`. Files whose content is unchanged are left
+    untouched, so rerunning a day is a no-op."""
+    built = build_digest(notes_dir, date, sources=sources, base_url=base_url, now=now)
+    md_path = Path(digests_dir) / f"{date}.md"
+    html_path = Path(digests_dir) / f"{date}.html"
+    _write_atomic(md_path, built.markdown, 0o644)  # published, so world-readable
+    _write_atomic(html_path, built.html, 0o644)
+    return md_path, html_path
