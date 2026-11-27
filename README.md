@@ -54,3 +54,37 @@ earlier days stay in the archive; a rebuild is byte-identical.
 - **X: deferred** (`deferred: no usable read route`). Blockers: no X connector exists on the host, the X API free tier cannot read other accounts' posts, and raw scraping is forbidden. To unblock: provide a connector or a paid API tier that can read the accounts, then implement `list_new`/`fetch_details` in `daily_pulse/adapters/x.py`. The seed handles stay in `[sources.x].handles`.
 - **Instagram: deferred until a CLI is configured** (`deferred: no CLI configured`). Blocker: no sanctioned read access to saved/liked reels. To unblock: set `IG_CLI_CMD` to a command that prints the JSON described in `docs/instagram-adapter.md` (saved reels first, then liked). Items carry metadata and a short caption excerpt only; they are rated through the summarizer.
 - Both modules appear in the run result with their status and never fail the run.
+
+## Publishing and the daily cron job
+
+`daily-pulse publish [--out DIR] [--site DIR] [--remote URL] [--branch gh-pages] [--no-build]` builds the site
+(unless `--no-build`) and force-pushes it as the **only** content of the `gh-pages` branch: one orphan commit
+made in a throwaway repository, so removed pages disappear and no other branch is touched. It uses the host's
+existing git credentials (SSH key or credential helper; no tokens live in the repo), never prompts, and
+without `--remote` publishes to this checkout's `origin`. If the branch already holds exactly this content,
+it makes no commit, pushes nothing and exits 0. A `.nojekyll` file is added so GitHub Pages serves the notes'
+`.md` files as they are instead of rendering them with Jekyll.
+
+Before anything is pushed the site is checked, and one problem fails the whole publish: a site that lives in or
+contains the data directory, a symlink, a dotfile or any file that is not `.html`, `.css`, `.md` or
+`runs/*.json`, or text that looks like a secret (GitHub/Anthropic/AWS/Slack tokens, private keys, or the value
+of an env var named `*TOKEN`, `*SECRET`, `*PASSWORD`, `*API_KEY` or `IG_CLI_CMD`).
+
+`scripts/run-daily.sh` is the cron entry point. It sets `PATH`, takes its own lock (`data/cron.lock`), then runs
+`run`, `digest` and `publish` for today, with stdin closed and git prompts disabled. It exits non-zero if any
+step fails, and calls `~/bin/notify -t daily-pulse -- "<message>"` when:
+
+- a step fails (the message names the step and exit code; a failed `run` skips the digest and publish), or
+- a module has failed twice in a row (`flagged` in `run-<date>.json`); the site is still published and the
+  script exits 0.
+
+A second invocation while one is running logs "already running" and exits 0, without notifying. Environment
+overrides: `DAILY_PULSE_BIN`, `_CONFIG`, `_DATA_DIR` (must match the config's `data_dir`), `_SITE`, `_REMOTE`,
+`_NOTIFY` (the notifier command), `_DATE`; see the header of the script.
+
+The crontab line (07:00 in the host's local time; adjust the checkout path). The operator installs it with
+`crontab -e` after a manual `scripts/run-daily.sh` has been verified; nothing here installs it:
+
+    0 7 * * * /home/deux/github/daily-pulse/scripts/run-daily.sh >> /home/deux/github/daily-pulse/data/logs/cron.log 2>&1
+
+`data/logs/` must exist before the first cron run (`mkdir -p data/logs`); the script itself creates `data/`.
