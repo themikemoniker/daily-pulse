@@ -88,7 +88,7 @@ def test_rate_limit_403_degrades_with_log_and_keeps_earlier_items(make_env, fixt
     assert code == 0
     assert res["sources"]["github"]["status"] == "ok"
     ids = set(items_by_id(res))
-    assert "rising:other/gizmo" in ids and "release:bob/tool:v0.3.0" not in ids
+    assert "rising:other/gizmo" in ids and "release:alice/proj:v1.2.0" not in ids
     assert adapter.last_run["degraded"] is True
     assert "rate limit" in adapter.last_run["reason"].lower()
     assert "rate limit" in caplog.text.lower()
@@ -100,7 +100,7 @@ def test_remaining_zero_on_success_stops_further_requests(make_env, fixtures_dir
     adapter = GitHubAdapter()
     registry.register(adapter)
     _, res = run(make_env, fixtures_dir)
-    assert res["sources"]["github"]["items"] == []
+    assert set(items_by_id(res)) == {"release:bob/tool:v0.3.0"}  # nothing after the budget ran out
     assert adapter.last_run["degraded"] is True
 
 
@@ -201,8 +201,9 @@ def test_without_fixtures_the_adapter_uses_the_real_transport(monkeypatch, make_
     registry.register(GitHubAdapter(sleep=lambda s: None))
     cfg, data, out = make_env(sources=(), extra=GITHUB_CFG)
     assert main(["run", "--config", str(cfg), "--out", str(out), "--date", "2026-01-15"]) == 0
-    assert seen[0].full_url.startswith("https://api.github.com/search/repositories?")
-    assert "created%3A%3E2026-01-08" in seen[0].full_url
+    urls = [r.full_url for r in seen]
+    search = [u for u in urls if "/search/repositories?" in u]
+    assert search and "created%3A%3E2026-01-08" in search[0]
 
 
 # -- star activity since the last run -------------------------------------------------------
@@ -253,3 +254,73 @@ def test_shipped_config_watches_the_seed_handles_and_oh_my_pi():
     assert {"karpathy", "mattpocock", "can1357", "simonw", "hamelsmu", "shreyashankar", "jxnl",
             "eugeneyan", "hwchase17", "anthropics", "langchain-ai"} <= set(gh["watch_accounts"])
     assert "can1357/oh-my-pi" in gh["watch_repos"]
+
+
+# -- robustness (review findings) -----------------------------------------------------------
+
+def edit_repos(fixtures, fn):
+    p = fixtures / "github" / "responses.json"
+    data = json.loads(p.read_text())
+    fn(data)
+    p.write_text(json.dumps(data))
+
+
+def test_repo_with_null_pushed_at_is_skipped_not_fatal(make_env, fixtures_dir):
+    def f(d):
+        d["/users/alice/repos"]["body"].insert(0, {
+            "full_name": "alice/empty", "name": "empty", "owner": {"login": "alice"},
+            "html_url": "https://github.com/alice/empty", "description": None,
+            "created_at": "2020-01-01T00:00:00Z", "pushed_at": None,
+            "stargazers_count": 0, "forks_count": 0, "language": None, "topics": [], "fork": False})
+    edit_repos(fixtures_dir, f)
+    _, res = run(make_env, fixtures_dir)
+    assert res["sources"]["github"]["status"] == "ok"
+    assert "release:alice/proj:v1.2.0" in items_by_id(res)
+
+
+def test_malformed_200_bodies_yield_no_items_for_that_call(make_env, fixtures_dir):
+    edit_repos(fixtures_dir, lambda d: d["/users/alice/repos"].update(body={"message": "odd"}))
+    _, res = run(make_env, fixtures_dir)
+    assert res["sources"]["github"]["status"] == "ok"
+    assert "release:bob/tool:v0.3.0" in items_by_id(res)
+
+
+def test_network_error_skips_that_account_and_keeps_the_rest(make_env, fixtures_dir, caplog):
+    inner = None
+
+    def transport(path, params):
+        if path.startswith("/users/alice"):
+            raise urllib.error.URLError("dns down")
+        from daily_pulse.adapters.github import FixtureTransport
+        return FixtureTransport(fixtures_dir)(path, params)
+
+    registry.register(GitHubAdapter(transport=transport))
+    _, res = run(make_env, fixtures_dir)
+    assert res["sources"]["github"]["status"] == "ok"
+    assert {"rising:other/gizmo", "release:bob/tool:v0.3.0"} <= set(items_by_id(res))
+
+
+def test_rate_limit_mid_account_keeps_items_found_so_far(make_env, fixtures_dir):
+    set_response(fixtures_dir, "/repos/alice/active/releases", 403, {"message": "API rate limit exceeded"},
+                 {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "4102444800"})
+    _, res = run(make_env, fixtures_dir)
+    ids = set(items_by_id(res))
+    assert "repo:alice/brand-new" in ids and "release:alice/proj:v1.2.0" in ids
+
+
+def test_corrupt_star_baseline_is_ignored(make_env, fixtures_dir):
+    cfg, data, out = make_env(sources=(), extra=GITHUB_CFG)
+    (data / "state").mkdir(parents=True)
+    (data / "state" / "github.json").write_text('{"stars": ["x"]}')
+    _, res = run(make_env, fixtures_dir)
+    assert res["sources"]["github"]["status"] == "ok"
+
+
+def test_watch_repos_are_checked_before_accounts_so_rate_limit_cannot_starve_them(make_env, fixtures_dir):
+    set_response(fixtures_dir, "/search/repositories", 200, {"items": []},
+                 {"X-RateLimit-Remaining": "50"})
+    set_response(fixtures_dir, "/repos/bob/tool/releases", 200,
+                 json.loads((fixtures_dir / "github/responses.json").read_text())["/repos/bob/tool/releases"]["body"],
+                 {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "4102444800"})
+    _, res = run(make_env, fixtures_dir)
+    assert "release:bob/tool:v0.3.0" in items_by_id(res)

@@ -134,20 +134,26 @@ class GitHubAdapter(SourceAdapter):
         self.last_run = {"degraded": False, "reason": ""}
         self._stars = self._load_stars(ctx)
         items: list[Item] = []
-        stages = [lambda: self._rising(ctx, now, int(cfg.get("rising_days", 7)))]
-        stages += [lambda a=a: self._account(ctx, now, a) for a in cfg.get("watch_accounts", [])]
-        stages += [lambda r=r: self._releases(ctx, now, r) for r in cfg.get("watch_repos", [])]
-        for stage in stages:
-            try:
-                items += stage()
-            except RateLimited as exc:
-                log.warning("github: degraded, returning %d item(s) found so far: %s", len(items), exc)
-                self.last_run = {"degraded": True, "reason": str(exc)}
-                break
+        # Watched repos first: they are explicitly required and cheap (one call each), so a
+        # tight rate limit must not starve them behind the larger account listings.
+        stages = [lambda r=r: items.extend(self._releases(ctx, now, r)) for r in cfg.get("watch_repos", [])]
+        stages.append(lambda: items.extend(self._rising(ctx, now, int(cfg.get("rising_days", 7)))))
+        stages += [lambda a=a: self._account(ctx, now, a, items) for a in cfg.get("watch_accounts", [])]
+        try:
+            for stage in stages:
+                try:
+                    stage()
+                except RateLimited as exc:
+                    log.warning("github: degraded, returning %d item(s) found so far: %s", len(items), exc)
+                    self.last_run = {"degraded": True, "reason": str(exc)}
+                    break
+                except Exception as exc:  # noqa: BLE001 - one bad call must not lose the rest
+                    log.warning("github: skipped one lookup: %s: %s", type(exc).__name__, exc)
+        finally:
+            self._save_stars(ctx)
         if self._exhausted and not self.last_run["degraded"]:
             log.warning("github: %s; remaining requests skipped", self._exhausted)
             self.last_run = {"degraded": True, "reason": self._exhausted}
-        self._save_stars(ctx)
         items.sort(key=lambda i: i.published, reverse=True)
         return items
 
@@ -161,8 +167,10 @@ class GitHubAdapter(SourceAdapter):
         try:
             data = json.loads(path.read_text()) if path else {}
             stars = data.get("stars", {}) if isinstance(data, dict) else {}
+            if not isinstance(stars, dict):
+                return {}
             return {k: v for k, v in stars.items() if isinstance(v, int)}
-        except (OSError, ValueError):
+        except (OSError, ValueError, AttributeError):
             return {}
 
     def _save_stars(self, ctx) -> None:
@@ -193,41 +201,49 @@ class GitHubAdapter(SourceAdapter):
         since = (now - timedelta(days=days)).date().isoformat()
         status, body = self._get(ctx, "/search/repositories", {
             "q": f"created:>{since}", "sort": "stars", "order": "desc", "per_page": 10})
-        if status != 200:
+        if status != 200 or not isinstance(body, dict) or not isinstance(body.get("items"), list):
             return []
         return [self._repo_item("rising", r, now, r["created_at"]) for r in body["items"]]
 
     # -- watched accounts ----------------------------------------------------------------
 
-    def _account(self, ctx, now, account) -> list[Item]:
+    def _account(self, ctx, now, account, items: list) -> None:
+        """Append this account's items to `items` as they are found, so a rate limit or error
+        part-way through keeps what was already collected."""
         lookback = int(ctx.config.get("lookback_days", 7))
         push_days = int(ctx.config.get("push_days", 1))
         status, repos = self._get(ctx, f"/users/{account}/repos", {"sort": "pushed", "per_page": 30})
-        if status != 200:
-            return []
-        items: list[Item] = []
+        if status != 200 or not isinstance(repos, list):
+            return
         for r in repos:
-            if r.get("fork"):
-                continue
-            created, pushed = _parse(r["created_at"]), _parse(r["pushed_at"])
-            stars_item = self._star_activity(ctx, r, now)
-            if stars_item:
-                items.append(stars_item)
-            if now - created <= timedelta(days=lookback):
-                items.append(self._repo_item("repo", r, now, r["created_at"]))
-                continue
-            if now - pushed > timedelta(days=lookback):
-                continue
-            found = self._releases(ctx, now, r["full_name"])
-            if not found:
-                found = self._tags(ctx, r)
-            items += found
-            if not found and now - pushed <= timedelta(days=push_days):
-                day = pushed.date().isoformat()
+            try:
+                self._repo(ctx, now, r, items, lookback, push_days)
+            except RateLimited:
+                raise
+            except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                log.warning("github: skipped a malformed repo entry from %s: %s", account, exc)
+
+    def _repo(self, ctx, now, r, items, lookback, push_days) -> None:
+        if r.get("fork"):
+            return
+        created = _parse(r["created_at"])
+        pushed = _parse(r["pushed_at"]) if r.get("pushed_at") else created
+        stars_item = self._star_activity(ctx, r, now)
+        if stars_item:
+            items.append(stars_item)
+        if now - created <= timedelta(days=lookback):
+            items.append(self._repo_item("repo", r, now, r["created_at"]))
+            return
+        if now - pushed > timedelta(days=lookback):
+            return
+        releases = self._releases(ctx, now, r["full_name"])
+        items += releases
+        if not releases:
+            items += self._tags(ctx, r)
+            if now - pushed <= timedelta(days=push_days):
                 item = self._repo_item("push", r, now, r["pushed_at"])
-                item.id = f"push:{r['full_name']}:{day}"
+                item.id = f"push:{r['full_name']}:{pushed.date().isoformat()}"
                 items.append(item)
-        return items
 
     def _star_activity(self, ctx, r, now) -> Item | None:
         """A notable star gain since the last run. The first sighting only sets the baseline."""
@@ -245,7 +261,7 @@ class GitHubAdapter(SourceAdapter):
     def _releases(self, ctx, now, full_name) -> list[Item]:
         lookback = int(ctx.config.get("lookback_days", 7))
         status, body = self._get(ctx, f"/repos/{full_name}/releases", {"per_page": 5})
-        if status != 200:
+        if status != 200 or not isinstance(body, list):
             return []
         out = []
         for rel in body:
@@ -264,8 +280,8 @@ class GitHubAdapter(SourceAdapter):
         return out
 
     def _tags(self, ctx, r) -> list[Item]:
-        status, body = self._get(ctx, f"/repos/{r['full_name']}/tags", {"per_page": 3})
-        if status != 200:
+        status, body = self._get(ctx, f"/repos/{r['full_name']}/tags", {"per_page": 1})
+        if status != 200 or not isinstance(body, list):
             return []
         return [
             Item(source="github", id=f"tag:{r['full_name']}:{t['name']}",
