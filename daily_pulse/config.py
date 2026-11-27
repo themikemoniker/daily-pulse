@@ -18,6 +18,8 @@ class Config:
     first_run_cap: int = 10
     alert_after_failures: int = 2
     sources: dict[str, dict] = field(default_factory=dict)
+    claude_cmd: str = "claude"
+    max_claude_calls: int = 30
 
 
 def _table(raw: dict, key: str) -> dict:
@@ -42,6 +44,10 @@ def load_config(path: Path) -> Config:
     path = Path(path)
     raw = tomllib.loads(path.read_text())
     run, paths, sources = _table(raw, "run"), _table(raw, "paths"), _table(raw, "sources")
+    summarizer = _table(raw, "summarizer")
+    claude_cmd = summarizer.get("claude_cmd", "claude")
+    if not isinstance(claude_cmd, str) or not claude_cmd.strip():
+        raise ConfigError(f"summarizer.claude_cmd must be a non-empty string, got {claude_cmd!r}")
     data_dir = paths.get("data_dir", "data")
     if not isinstance(data_dir, str) or not data_dir:
         raise ConfigError(f"paths.data_dir must be a non-empty string, got {data_dir!r}")
@@ -55,4 +61,6 @@ def load_config(path: Path) -> Config:
         first_run_cap=_int(run, "first_run_cap", 10, 0, "run.first_run_cap"),
         alert_after_failures=_int(run, "alert_after_failures", 2, 1, "run.alert_after_failures"),
         sources=sources,
+        claude_cmd=claude_cmd,
+        max_claude_calls=_int(summarizer, "max_calls", 30, 0, "summarizer.max_calls"),
     )

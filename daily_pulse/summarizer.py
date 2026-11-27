@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from daily_pulse.config import Config
 from daily_pulse.models import VERDICTS, Beat, Item, Rating
 from daily_pulse.quoteguard import QuoteBudget, guard_fields
 
@@ -21,6 +23,7 @@ log = logging.getLogger("daily_pulse")
 
 DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 VIDEO_SOURCES = ("youtube",)
+CLAUDE_ENV = "DAILY_PULSE_CLAUDE"
 DEFAULT_MAX_CALLS = 30
 DEFAULT_TIMEOUT = 300.0  # seconds per call
 ATTEMPTS = 2  # the first call plus one retry
@@ -131,6 +134,14 @@ class Summarizer:
     timeout: float = DEFAULT_TIMEOUT
     prompts_dir: Path = DEFAULT_PROMPTS_DIR
     calls_made: int = field(default=0, init=False)
+
+    @classmethod
+    def from_config(cls, config: Config, env=None) -> "Summarizer":
+        """The binary comes from $DAILY_PULSE_CLAUDE if set (tests point it at a fake script),
+        else `[summarizer].claude_cmd`."""
+        env = os.environ if env is None else env
+        return cls(claude_cmd=(env.get(CLAUDE_ENV) or "").strip() or config.claude_cmd,
+                   max_calls=config.max_claude_calls)
 
     def _prompt(self, item: Item, transcript: str) -> str:
         rubric = (Path(self.prompts_dir) / "rubric.md").read_text(encoding="utf-8")

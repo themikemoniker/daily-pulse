@@ -275,3 +275,44 @@ def test_item_excerpt_counts_as_source_text(fake_claude):
     claude = fake_claude(good(summary=excerpt))
     rating = Summarizer(claude_cmd=str(claude.path)).rate(repo_item(text=excerpt))
     assert longest_copied_run(rating.summary, excerpt) <= MAX_COPY_RUN
+
+
+def _cfg(tmp_path, body=""):
+    from daily_pulse.config import load_config
+
+    path = tmp_path / "c.toml"
+    path.write_text(body)
+    return load_config(path)
+
+
+def test_config_defaults_for_the_summarizer(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert cfg.max_claude_calls == 30
+    assert cfg.claude_cmd == "claude"
+
+
+def test_config_sets_the_binary_and_the_cap(tmp_path):
+    cfg = _cfg(tmp_path, '[summarizer]\nclaude_cmd = "/opt/claude"\nmax_calls = 5\n')
+    assert (cfg.claude_cmd, cfg.max_claude_calls) == ("/opt/claude", 5)
+
+
+@pytest.mark.parametrize("body", [
+    "[summarizer]\nmax_calls = -1\n", '[summarizer]\nmax_calls = "ten"\n',
+    "[summarizer]\nclaude_cmd = 3\n", '[summarizer]\nclaude_cmd = ""\n', "summarizer = 3\n",
+])
+def test_bad_summarizer_config_is_rejected(tmp_path, body):
+    from daily_pulse.config import ConfigError
+
+    with pytest.raises(ConfigError):
+        _cfg(tmp_path, body)
+
+
+def test_summarizer_built_from_config_and_env_override(tmp_path, fake_claude):
+    cfg = _cfg(tmp_path, '[summarizer]\nclaude_cmd = "/opt/claude"\nmax_calls = 5\n')
+    s = Summarizer.from_config(cfg, env={})
+    assert (s.claude_cmd, s.max_calls) == ("/opt/claude", 5)
+    claude = fake_claude(good())
+    s = Summarizer.from_config(cfg, env={"DAILY_PULSE_CLAUDE": str(claude.path)})
+    assert s.claude_cmd == str(claude.path)
+    assert s.rate(repo_item()) is not None
+    assert Summarizer.from_config(cfg, env={"DAILY_PULSE_CLAUDE": "  "}).claude_cmd == "/opt/claude"
