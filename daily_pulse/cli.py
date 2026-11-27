@@ -14,6 +14,7 @@ from datetime import date as _date
 from pathlib import Path
 
 from daily_pulse.adapters.registry import register_builtin
+from daily_pulse import watchlist
 from daily_pulse.config import DEFAULT_CONFIG, ConfigError, load_config
 from daily_pulse.digest import parse_time, write_digest
 from daily_pulse.publish import PublishError, publish_site
@@ -58,11 +59,58 @@ def _parser() -> argparse.ArgumentParser:
     u.add_argument("--no-build", action="store_true", help="publish the site directory as it is")
     u.add_argument("--remote", default=None, help="git remote URL or path (default: this repo's origin)")
     u.add_argument("--branch", default="gh-pages")
+    w = sub.add_parser("watch", help="add, list or remove creators to watch (config/watchlist.toml)")
+    wsub = w.add_subparsers(dest="watch_command", required=True)
+    for name, text in (("add", "start watching a creator"), ("remove", "stop watching a creator"),
+                       ("list", "show everything watched")):
+        wp = wsub.add_parser(name, help=text)
+        wp.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
+                        help="main config; the watchlist is watchlist.toml beside it")
+        wp.add_argument("--watchlist", type=Path, default=None, help="watchlist file (default: beside --config)")
+        if name != "list":
+            wp.add_argument("target", help="a profile URL, or a handle with --source")
+            wp.add_argument("--source", choices=watchlist.SOURCES, default=None,
+                            help="platform, for a bare handle (a URL or owner/repo is detected)")
     return p
+
+
+def _watch(args) -> int:
+    path = args.watchlist or args.config.parent / "watchlist.toml"
+    try:
+        if args.watch_command == "list":
+            data = watchlist.load(path)
+            total = 0
+            for source, table in data.items():
+                values = [v for vs in table.values() for v in vs]
+                total += len(values)
+                note = f"  ({watchlist.INERT[source]})" if source in watchlist.INERT and values else ""
+                print(f"{source}: {len(values)}{note}")
+                for key, vs in table.items():
+                    for v in vs:
+                        print(f"  {v}" + ("  [repo]" if key == "repos" else ""))
+            print(f"{total} watched in {path}")
+            return 0
+        source, key, value = watchlist.parse_target(args.target, args.source)
+        if args.watch_command == "add":
+            if watchlist.add(path, source, key, value):
+                print(f"watching {source}: {value}" + (f"  ({watchlist.INERT[source]})" if source in watchlist.INERT else ""))
+            else:
+                print(f"already watched: {source}: {value}")
+            return 0
+        if watchlist.remove(path, source, key, value):
+            print(f"stopped watching {source}: {value}")
+            return 0
+        print(f"daily-pulse: {source}: {value} is not on the watchlist", file=sys.stderr)
+        return 1
+    except watchlist.WatchError as exc:
+        print(f"daily-pulse: {exc}", file=sys.stderr)
+        return 2
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "watch":  # edits the watchlist file only
+        return _watch(args)
     if args.command == "site":  # reads no config: it only needs the output directory
         return _site(args, args.date or _date.today().isoformat())
     try:

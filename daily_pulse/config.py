@@ -5,6 +5,9 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from daily_pulse.watchlist import WatchError, merge_into
+from daily_pulse.watchlist import load as load_watchlist
+
 DEFAULT_CONFIG = Path("config/daily-pulse.toml")
 
 
@@ -82,9 +85,10 @@ def _quality(raw: dict) -> QualityConfig:
     return quality
 
 
-def load_config(path: Path) -> Config:
+def load_config(path: Path, watchlist: Path | None = None) -> Config:
     """A relative paths.data_dir is resolved against the config file's directory, so cron
-    started from any cwd uses the same state and lock."""
+    started from any cwd uses the same state and lock. `watchlist.toml` beside the config (or
+    `watchlist`) is merged into the source tables."""
     path = Path(path)
     raw = tomllib.loads(path.read_text())
     run, paths, sources = _table(raw, "run"), _table(raw, "paths"), _table(raw, "sources")
@@ -104,6 +108,10 @@ def load_config(path: Path) -> Config:
             raise ConfigError(f"[sources.{name}] must be a table")
         if not isinstance(source.get("enabled", True), bool):
             raise ConfigError(f"sources.{name}.enabled must be true or false")
+    try:
+        merge_into(sources, load_watchlist(watchlist or path.parent / "watchlist.toml"))
+    except WatchError as exc:
+        raise ConfigError(str(exc)) from None
     return Config(
         data_dir=path.parent / data_dir,
         first_run_cap=_int(run, "first_run_cap", 10, 0, "run.first_run_cap"),
