@@ -44,3 +44,5 @@ class Rating:
     takeaways: list[str] = field(default_factory=list)  # videos: 5-8
     beats: list[Beat] = field(default_factory=list)  # videos: argument with timestamps
     quotes: list[str] = field(default_factory=list)  # short verbatim snippets, budgeted
+    diamond: bool = False  # high-signal, early and low-noise
+    diamond_reason: str = ""
