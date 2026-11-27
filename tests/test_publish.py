@@ -201,3 +201,31 @@ def test_credentials_in_a_remote_url_are_not_echoed_in_errors(cfg, site, capsys)
     assert main(["publish", "--config", str(cfg), "--site", str(site), "--no-build",
                  "--remote", "ssh://user:hunter2pass@127.0.0.1:1/x.git"]) == 1
     assert "hunter2pass" not in capsys.readouterr().err
+
+
+def test_a_nested_branch_ending_in_gh_pages_is_not_mistaken_for_it(cfg, site, remote, tmp_path):
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    (other / "f").write_text("x")
+    subprocess.run(["git", "-C", str(other), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(other), "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "x"],
+                   check=True)
+    subprocess.run(["git", "-C", str(other), "push", "-q", str(remote), "HEAD:refs/heads/feature/gh-pages"],
+                   check=True)
+    assert publish(cfg, site, remote) == 0
+    assert "index.html" in branch_files(remote)
+    assert git(remote, "rev-parse", "feature/gh-pages") != git(remote, "rev-parse", "gh-pages")
+
+
+def test_a_site_that_contains_the_data_dir_is_refused(make_env, remote, capsys):
+    cfg, data, _ = make_env(sources=())
+    (data / "state").mkdir(parents=True)
+    (data / "state" / "x.html").write_text("x")
+    assert_refused(cfg, data.parent, remote, capsys, "data directory")
+
+
+@pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "SSH_PRIVATE_KEY", "GH_PAT", "DEPLOY_KEY"])
+def test_more_secret_env_names_are_covered(cfg, site, remote, capsys, monkeypatch, name):
+    monkeypatch.setenv(name, "s3cr3t-value-123")
+    (site / "index.html").write_text("<html>s3cr3t-value-123</html>")
+    assert_refused(cfg, site, remote, capsys, "looks like a secret")

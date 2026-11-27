@@ -24,7 +24,7 @@ SECRET_PATTERNS = [re.compile(p) for p in (
     r"gh[pousr]_[A-Za-z0-9]{20,}", r"github_pat_[A-Za-z0-9_]{20,}", r"sk-ant-[A-Za-z0-9_-]{10,}",
     r"AKIA[0-9A-Z]{16}", r"-----BEGIN [A-Z ]*PRIVATE KEY-----", r"xox[abprs]-[A-Za-z0-9-]{10,}",
 )]
-SECRET_ENV = re.compile(r"(TOKEN|SECRET|PASSWORD|API_KEY|CREDENTIALS?)$|^IG_CLI_CMD$")
+SECRET_ENV = re.compile(r"(TOKEN|SECRET|PASSWORD|PASSPHRASE|PRIVATE_KEY|API_KEY|_KEY|_PAT|CREDENTIAL)S?$|^IG_CLI_CMD$")
 
 
 class PublishError(Exception):
@@ -76,7 +76,7 @@ def _git(cwd: Path, *args: str) -> str:
         raise PublishError(f"git {args[0]} failed: {exc}") from exc
     if done.returncode != 0:
         lines = [ln.strip() for ln in done.stderr.splitlines() if ln.strip() and not ln.startswith("hint:")]
-        detail = re.sub(r"://[^/@\s]+@", "://***@", " ".join(lines))[:300] or "no output"  # no URL credentials
+        detail = re.sub(r"://\S*@", "://***@", " ".join(lines))[:300] or "no output"  # no URL credentials
         raise PublishError(f"git {args[0]} failed: {detail}")
     return done.stdout.strip()
 
@@ -105,7 +105,9 @@ def publish_site(site: Path, remote: str, branch: str = "gh-pages", forbidden: t
 
 def _remote_tree(work: Path, remote: str, branch: str) -> str | None:
     """Tree id of the remote branch, or None if the branch does not exist yet."""
-    if not _git(work, "ls-remote", "--heads", remote, branch):
+    ref = f"refs/heads/{branch}"
+    listed = _git(work, "ls-remote", remote, ref)  # a pattern: it also matches refs/heads/x/<branch>
+    if ref not in [line.split("\t")[-1] for line in listed.splitlines()]:
         return None
-    _git(work, "fetch", "-q", "--depth=1", remote, f"refs/heads/{branch}")
+    _git(work, "fetch", "-q", "--depth=1", remote, ref)
     return _git(work, "rev-parse", "FETCH_HEAD^{tree}")

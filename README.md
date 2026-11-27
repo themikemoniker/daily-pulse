@@ -98,3 +98,10 @@ The crontab line (07:00 in the host's local time; adjust the checkout path). The
     0 7 * * * /home/deux/github/daily-pulse/scripts/run-daily.sh >> /home/deux/github/daily-pulse/data/logs/cron.log 2>&1
 
 `data/logs/` must exist before the first cron run (`mkdir -p data/logs`); the script itself creates `data/`.
+
+Operating notes:
+
+- **Credentials under cron.** Cron has no SSH agent and git is told never to prompt, so the host needs a push credential that works unattended: an unencrypted deploy key, a git credential helper for an HTTPS remote, or an agent socket. Otherwise publish fails cleanly and you are notified.
+- **A refused publish.** If the check above names a file, the site already holds something that must not be public. Delete that file under `site/` (and its source note under `data/out/notes/`, or the next run copies it back), then rerun `scripts/run-daily.sh`.
+- **`--site` and the data dir.** Without `--site`, `publish` uses `<out>/site`, which is refused when `--out` is inside the data dir (e.g. `data/out`). Pass `--site` explicitly, as the wrapper does.
+- **Overlap with a manual run.** The wrapper's lock only stops two copies of the script. `daily-pulse run` started by hand at the same moment exits 0 without doing anything, and the wrapper then publishes whatever result is on disk. Don't run the pipeline by hand around 07:00.
