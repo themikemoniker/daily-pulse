@@ -18,15 +18,24 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from daily_pulse.adapters.base import AdapterContext, SourceAdapter
+from daily_pulse.adapters.base import AdapterContext, ItemSkipped, SourceAdapter
 from daily_pulse.models import Item
 from daily_pulse.notes import write_note, write_transcript
+from daily_pulse.state import atomic_write_json
 
 log = logging.getLogger("daily_pulse")
 
 WATCH_URL = "https://www.youtube.com/watch?v="
 DESCRIPTION_EXCERPT = 500  # characters of the video description given to the rater
 UNAVAILABLE_TITLES = ("[private video]", "[deleted video]")  # placeholders that can never be fetched
+MAX_ATTEMPTS = 3  # yt-dlp failures for one video before it is given up on
+# yt-dlp errors that no retry will fix: skip the video at once
+PERMANENT_ERRORS = re.compile(
+    r"private video|members-only|members only|join this channel|confirm your age|age-restricted"
+    r"|not made this video available in your country|blocked it in your country|video unavailable"
+    r"|has been removed|account.*terminated", re.I)
+# a subtitle download that failed (as opposed to a video that has no subtitles)
+SUBTITLE_FAILURE = re.compile(r"unable to download|http error|429|too many requests|timed out", re.I)
 NO_CAPTIONS = "No captions available; rated from metadata only."
 METADATA_ONLY_TAG = "metadata-only"
 
@@ -82,9 +91,10 @@ class ProcessYtDlp:
         self.cmd = cmd
         self.timeout = timeout
 
-    def _run(self, *args: str) -> str:
+    def _exec(self, *args: str, warnings: bool = False) -> subprocess.CompletedProcess:
+        quiet = [] if warnings else ["--no-warnings"]
         try:
-            proc = subprocess.run([*shlex.split(self.cmd), "--no-warnings", *args], capture_output=True,
+            proc = subprocess.run([*shlex.split(self.cmd), *quiet, *args], capture_output=True,
                                   text=True, encoding="utf-8", errors="replace", timeout=self.timeout,
                                   stdin=subprocess.DEVNULL)
         except (OSError, ValueError) as exc:
@@ -93,7 +103,10 @@ class ProcessYtDlp:
             raise YtDlpError(f"yt-dlp timed out after {self.timeout}s") from None
         if proc.returncode != 0:
             raise YtDlpError(f"yt-dlp exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
-        return proc.stdout
+        return proc
+
+    def _run(self, *args: str) -> str:
+        return self._exec(*args).stdout
 
     def _json(self, *args: str) -> dict:
         try:
@@ -116,9 +129,15 @@ class ProcessYtDlp:
     def subtitles(self, url: str, auto: bool, dest: Path) -> Path | None:
         """English captions as VTT in `dest`: the uploader's own subtitles, or (auto=True) the
         auto-generated ones. None when the video has none of that kind."""
-        self._run("--no-playlist", "--skip-download", "--write-auto-subs" if auto else "--write-subs",
-                  "--sub-langs", "en", "--sub-format", "vtt", "-o", str(Path(dest) / "%(id)s.%(ext)s"), url)
-        return next(iter(sorted(Path(dest).glob("*.vtt"))), None)
+        # Warnings stay on: yt-dlp reports a rate-limited subtitle download only as a warning
+        # with exit 0, and that must not be mistaken for a video that has no subtitles.
+        proc = self._exec("--no-playlist", "--skip-download", "--write-auto-subs" if auto else "--write-subs",
+                          "--sub-langs", "en", "--sub-format", "vtt",
+                          "-o", str(Path(dest) / "%(id)s.%(ext)s"), url, warnings=True)
+        found = next(iter(sorted(Path(dest).glob("*.vtt"))), None)
+        if found is None and SUBTITLE_FAILURE.search(proc.stderr):
+            raise YtDlpError(f"subtitle download failed: {proc.stderr.strip()[-300:]}")
+        return found
 
 
 class FixtureYtDlp:
@@ -207,7 +226,37 @@ class YouTubeAdapter(SourceAdapter):
                 return cleaned
         return ""
 
+    def _attempts_path(self, ctx: AdapterContext) -> Path | None:
+        return None if ctx.data_dir is None or ctx.dry_run else Path(ctx.data_dir) / "state" / "youtube-attempts.json"
+
+    def _record_failure(self, item: Item, exc: YtDlpError, ctx: AdapterContext) -> None:
+        """Count a yt-dlp failure for this video. A permanent error, or the MAX_ATTEMPTS-th failure,
+        raises ItemSkipped (the runner marks the video processed, so it stops being retried and
+        stops failing the source); otherwise the failure goes on to the runner, which retries next run."""
+        if PERMANENT_ERRORS.search(str(exc)):
+            raise ItemSkipped(f"{item.id}: {exc}") from exc
+        path = self._attempts_path(ctx)
+        if path is None:
+            return
+        try:
+            counts = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            counts = counts if isinstance(counts, dict) else {}
+            counts[item.id] = n = (counts.get(item.id) if isinstance(counts.get(item.id), int) else 0) + 1
+            atomic_write_json(path, counts)
+        except (OSError, ValueError) as exc2:  # counting must never hide the real failure
+            log.warning("youtube: cannot record the failed attempt for %s: %s", item.id, exc2)
+            return
+        if n >= MAX_ATTEMPTS:
+            raise ItemSkipped(f"{item.id}: failed {n} times, giving up: {exc}") from exc
+
     def fetch_details(self, item: Item, ctx: AdapterContext) -> Item:
+        try:
+            return self._fetch(item, ctx)
+        except YtDlpError as exc:
+            self._record_failure(item, exc, ctx)
+            raise
+
+    def _fetch(self, item: Item, ctx: AdapterContext) -> Item:
         client = self._yt(ctx)
         info = client.info(item.url)
         item.title = str(info.get("title") or item.title)

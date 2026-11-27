@@ -73,7 +73,8 @@ def rating_reply(**over):
 class FakeYtDlp:
     """Stands in for yt-dlp: canned playlist, per-video info and captions. Records every call."""
 
-    def __init__(self, ids=(), subs=None, fail_info=(), fail_playlist=False):
+    def __init__(self, ids=(), subs=None, fail_info=(), fail_playlist=False, fail_message=None):
+        self.fail_message = fail_message
         self.ids = list(ids)
         self.subs = subs or {}  # id -> {"manual": vtt, "auto": vtt}
         self.fail_info = set(fail_info)
@@ -90,7 +91,7 @@ class FakeYtDlp:
         vid = url.rsplit("=", 1)[-1]
         self.calls.append(("info", vid))
         if vid in self.fail_info:
-            raise YtDlpError(f"cannot fetch {vid}")
+            raise YtDlpError(self.fail_message or f"cannot fetch {vid}")
         return {"id": vid, "title": f"Title {vid}", "channel": "Chan", "duration": 754,
                 "upload_date": "20260112", "view_count": 4321,
                 "description": "A talk about loops.\nSecond line."}
@@ -288,6 +289,8 @@ elif "--skip-download" in args and ("--write-subs" in args or "--write-auto-subs
     kind = "auto" if "--write-auto-subs" in args else "manual"
     vid = url.rsplit("=", 1)[-1]
     src = d / f"{{vid}}.{{kind}}.vtt"
+    if (d / "sub-stderr").exists():
+        sys.stderr.write((d / "sub-stderr").read_text())
     if src.exists():
         out = pathlib.Path(args[args.index("-o") + 1].replace("%(id)s", vid).replace("%(ext)s", "vtt"))
         out.with_name(f"{{vid}}.en.vtt").write_text(src.read_text())
@@ -448,3 +451,75 @@ def test_a_real_run_without_a_notes_dir_fails_the_video_instead_of_consuming_it(
     res = run_pipeline(load_config(e.cfg), DATE, None)  # no out_dir: nowhere to write the note
     assert res.sources["youtube"]["status"] == "failed"
     assert not (e.data / "state" / "processed.json").exists()
+
+
+# --- review round 1 ---
+
+RATE_LIMITED = "WARNING: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests\n"
+
+
+def test_a_rate_limited_subtitle_download_is_an_error_not_an_absence(fake_ytdlp, tmp_path):
+    (fake_ytdlp.dir / "sub-stderr").write_text(RATE_LIMITED)
+    with pytest.raises(YtDlpError, match="429"):
+        ProcessYtDlp(str(fake_ytdlp.path)).subtitles("https://www.youtube.com/watch?v=a", False, tmp_path)
+    assert "--no-warnings" not in fake_ytdlp.argv(0)  # the warning is what tells us it failed
+    (fake_ytdlp.dir / "sub-stderr").write_text("[info] There are no subtitles for the requested languages\n")
+    assert ProcessYtDlp(str(fake_ytdlp.path)).subtitles("https://www.youtube.com/watch?v=a", False, tmp_path) is None
+
+
+def test_a_video_whose_captions_were_rate_limited_is_not_rated_or_marked_processed(env, fake_ytdlp):
+    (fake_ytdlp.dir / "playlist.json").write_text(json.dumps({"entries": [{"id": "v1", "title": "T"}]}))
+    (fake_ytdlp.dir / "info.json").write_text(json.dumps({"id": "v1", "title": "T", "channel": "C"}))
+    (fake_ytdlp.dir / "sub-stderr").write_text(RATE_LIMITED)
+    e = env()
+    res = e.go(ProcessYtDlp(str(fake_ytdlp.path)))
+    assert res.sources["youtube"]["status"] == "failed"
+    assert e.notes() == [] and e.claude.calls == 0
+    processed = e.data / "state" / "processed.json"
+    assert not processed.exists() or "v1" not in json.loads(processed.read_text()).get("youtube", [])
+
+
+def test_a_video_that_keeps_failing_is_given_up_on_after_three_attempts(env):
+    e = env()
+    statuses = [e.go(FakeYtDlp(["good", "bad"], fail_info={"bad"}, subs={"good": {"manual": MANUAL}}))
+                .sources["youtube"]["status"] for _ in range(3)]
+    assert statuses == ["failed", "failed", "ok"]
+    processed = json.loads((e.data / "state" / "processed.json").read_text())["youtube"]
+    assert "bad" in processed
+    client = FakeYtDlp(["good", "bad"], fail_info={"bad"})
+    res = e.go(client)
+    assert res.sources["youtube"]["status"] == "ok"
+    assert [c[0] for c in client.calls] == ["playlist"]  # not retried
+    assert [n.name for n in e.notes()] == ["youtube-good.md"]  # and no note was made for it
+
+
+@pytest.mark.parametrize("message", [
+    "ERROR: [youtube] x: Private video. Sign in if you've been granted access to this video",
+    "ERROR: [youtube] x: Join this channel to get access to members-only content",
+    "ERROR: [youtube] x: Sign in to confirm your age. This video may be inappropriate for some users",
+    "ERROR: [youtube] x: The uploader has not made this video available in your country",
+])
+def test_a_permanently_unavailable_video_is_skipped_at_once(env, message):
+    e = env()
+    res = e.go(FakeYtDlp(["good", "locked"], fail_info={"locked"}, fail_message=message,
+                         subs={"good": {"manual": MANUAL}}))
+    assert res.sources["youtube"]["status"] == "ok"
+    assert "locked" in json.loads((e.data / "state" / "processed.json").read_text())["youtube"]
+
+
+def test_beats_in_a_two_hour_video_may_use_h_mm_ss_and_three_digit_minutes(env):
+    long_vtt = "WEBVTT\n\n01:45:12.000 --> 01:45:20.000\nnear the end\n\n00:05:00.000 --> 00:05:04.000\nearlier\n"
+    beats = [{"timestamp": "5:00", "text": "Sets up."}, {"timestamp": "105:12", "text": "Wraps up."},
+             {"timestamp": "1:45:12", "text": "Final remarks."}]
+    e = env(claude_replies=[rating_reply(beats=beats)])
+    res = e.go(FakeYtDlp(["long"], subs={"long": {"manual": long_vtt}}))
+    assert res.sources["youtube"]["status"] == "ok"
+    text = e.notes()[0].read_text()
+    assert "- [105:12] Wraps up." in text and "- [1:45:12] Final remarks." in text
+    assert "[1:45:12] near the end" in (e.data / "transcripts" / "youtube-long.txt").read_text()
+
+
+def test_the_prompt_tells_the_model_to_use_h_mm_ss_past_one_hour():
+    from daily_pulse.summarizer import DEFAULT_PROMPTS_DIR
+
+    assert "H:MM:SS" in (DEFAULT_PROMPTS_DIR / "summarize.md").read_text()

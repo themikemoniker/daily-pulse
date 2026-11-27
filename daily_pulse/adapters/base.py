@@ -19,6 +19,11 @@ class AdapterContext:
     dry_run: bool = False  # write nothing to disk and make no `claude` calls
 
 
+class ItemSkipped(Exception):
+    """Raised by `fetch_details` for an item that can never be processed (or has failed too
+    often): the runner marks it processed and carries on, with no error and no item."""
+
+
 class SourceAdapter(ABC):
     name: str
 

@@ -21,7 +21,8 @@ VIDEO_SOURCES = ("youtube",)
 MAX_TAKEAWAYS = 8
 
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
-_TIMESTAMP = re.compile(r"[0-9]{1,2}(:[0-9]{2}){1,2}")
+# 05:30, 105:12 (up to 3-digit minutes) or 1:05:30 (H:MM:SS)
+TIMESTAMP = re.compile(r"[0-9]{1,3}:[0-5][0-9](:[0-5][0-9])?")
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 MAX_STEM = 120  # keeps `<stem>-<hash>.md` far below filesystem name limits
 
@@ -74,7 +75,7 @@ def _validate(item: Item, rating: Rating, date: str) -> None:
     if item.source not in VIDEO_SOURCES and not _one_line(rating.summary):
         raise NoteError(f"{item.source}-{item.id}: a {item.source} note needs a summary")
     for beat in rating.beats:
-        if not _TIMESTAMP.fullmatch(str(beat.timestamp)):
+        if not TIMESTAMP.fullmatch(str(beat.timestamp)):
             raise NoteError(f"beat timestamp must look like 05:30 or 1:05:30, got {beat.timestamp!r}")
 
 

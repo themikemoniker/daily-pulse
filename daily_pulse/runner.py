@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from daily_pulse.adapters import registry
-from daily_pulse.adapters.base import AdapterContext
+from daily_pulse.adapters.base import AdapterContext, ItemSkipped
 from daily_pulse.config import Config
 from daily_pulse.state import FailureCounters, StateError, StateStore, serialize_json
 from daily_pulse.summarizer import Summarizer
@@ -57,6 +57,10 @@ def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list) -> Excep
             # Prove the item can be reported *before* it is marked processed, so a bad
             # item is retried next run instead of being consumed and lost.
             serialize_json(item.to_dict())
+        except ItemSkipped as skipped:
+            log.warning("%s: item %s skipped for good: %s", name, candidate.id, skipped)
+            state.mark_processed(name, candidate.id)
+            continue
         except Exception as exc:  # noqa: BLE001
             log.error("%s: item %s failed\n%s", name, candidate.id, traceback.format_exc())
             error = error or exc
