@@ -29,3 +29,12 @@ A daily trends digest. Under construction; see the spec issue.
 - `[summarizer] max_calls` (default 30) caps `claude -p` calls per run, retries included. Once reached, remaining items are unrated.
 - The binary is `[summarizer] claude_cmd` or, if set, `$DAILY_PULSE_CLAUDE` (a command string; tests point it at a fake script). Tests never run the real `claude`.
 - Returned ratings pass through the quote guard against the transcript and the item excerpt: no run of more than 40 copied words, and quoted words capped under 50 per item. Not yet called by the runner; the digest ticket plugs in.
+
+## YouTube source
+
+- Set `[sources.youtube] playlist_url` to a public playlist. While it is empty the source reports `not configured` and the run carries on.
+- yt-dlp is needed at run time (it is not a Python dependency). `scripts/install-ytdlp.sh` installs it into the repo's `.venv` with a plain pip install (no sudo). Point the config at the binary with `ytdlp_cmd = "/path/to/repo/.venv/bin/yt-dlp"` in `[sources.youtube]` (cron has a short PATH, so use the full path), or set `$DAILY_PULSE_YTDLP`, which wins over the config. With `--fixtures` the adapter reads recorded output from `<fixtures>/youtube/` (`playlist.json`, `<id>.info.json`, `<id>.en.vtt` for manual subtitles, `<id>.en.auto.vtt` for auto captions) and never runs yt-dlp.
+- The playlist is read with `yt-dlp --flat-playlist -J` in the order YouTube lists it, taken as newest first, so the first-run cap keeps the top 10. Each new video then gets `-J` metadata (title, channel, duration, upload date, views) and English captions: manual subtitles first, auto captions only if there are none.
+- Captions are cleaned (markup, entities and rolling auto-caption repeats removed; `[mm:ss]` timestamps kept) and saved only to `<data_dir>/transcripts/youtube-<id>.txt`. The cleaned text goes to the summarizer, and the note (`<out>/notes/<date>/youtube-<id>.md`) holds an own-words summary, takeaways, a timestamped argument and short quotes, all passing the quote guard.
+- No captions: the video is rated from its metadata and description excerpt, and the note is flagged with a `metadata-only` tag and a "Metadata only (no captions)" reason prefix.
+- A video whose yt-dlp call, caption download or rating fails is logged and skipped. It is not marked processed, so the next run retries it; the other videos are unaffected. Processed IDs make a rerun find nothing new.

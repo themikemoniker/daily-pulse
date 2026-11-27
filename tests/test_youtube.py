@@ -1,6 +1,15 @@
+import json
+import re
+import sys
 from pathlib import Path
 
-from daily_pulse.adapters.youtube import clean_vtt
+import pytest
+
+from daily_pulse.adapters import registry
+from daily_pulse.adapters.youtube import (FixtureYtDlp, ProcessYtDlp, YouTubeAdapter, YtDlpError,
+                                          clean_vtt, make_client)
+from daily_pulse.config import load_config
+from daily_pulse.runner import run_pipeline
 
 YT = Path(__file__).parent / "fixtures" / "youtube"
 
@@ -37,15 +46,8 @@ def test_a_cue_with_no_text_or_a_file_with_no_cues_cleans_to_empty():
 
 # --- the adapter, driven through the pipeline runner with a fake yt-dlp and a fake claude ---
 
-import json  # noqa: E402
-import re  # noqa: E402
 
-import pytest  # noqa: E402
 
-from daily_pulse.adapters import registry  # noqa: E402
-from daily_pulse.adapters.youtube import YouTubeAdapter, YtDlpError  # noqa: E402
-from daily_pulse.config import load_config  # noqa: E402
-from daily_pulse.runner import run_pipeline  # noqa: E402
 
 DATE = "2026-01-15"
 MANUAL = (YT / "manual.en.vtt").read_text()
@@ -268,9 +270,7 @@ def test_notes_carry_no_transcript_text_beyond_short_quotes(env):
 
 # --- the real yt-dlp client, driven against a fake yt-dlp executable ---
 
-import sys  # noqa: E402
 
-from daily_pulse.adapters.youtube import FixtureYtDlp, ProcessYtDlp, make_client  # noqa: E402
 
 FAKE_YTDLP = '''#!{python}
 import json, pathlib, sys
@@ -386,3 +386,23 @@ def test_with_fixtures_the_adapter_reads_recorded_inputs_and_never_runs_yt_dlp(e
     assert result.sources["youtube"]["status"] == "ok"
     assert [n.name for n in e.notes()] == ["youtube-fx1.md"]
     assert isinstance(make_client({}, fixtures_dir), FixtureYtDlp)
+
+
+def test_the_install_script_is_executable_and_valid_bash():
+    import os
+    import subprocess
+
+    script = Path(__file__).parent.parent / "scripts" / "install-ytdlp.sh"
+    assert os.access(script, os.X_OK)
+    assert subprocess.run(["bash", "-n", str(script)]).returncode == 0
+    assert "sudo" not in script.read_text().replace("no sudo", "")
+
+
+def test_the_cli_registers_the_youtube_adapter(make_env, fixtures_dir):
+    from daily_pulse.cli import main
+
+    cfg, data, out = make_env(sources=("youtube",))  # no playlist_url: reports "not configured"
+    assert main(["run", "--config", str(cfg), "--fixtures", str(fixtures_dir), "--out", str(out),
+                 "--date", DATE]) == 0
+    res = json.loads((out / f"run-{DATE}.json").read_text())
+    assert res["sources"]["youtube"]["status"] == "not configured"
