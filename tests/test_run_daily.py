@@ -29,6 +29,11 @@ if cmd == "run" and os.environ.get("STUB_HOLD"):
         if Path(os.environ["STUB_HOLD"] + ".release").exists():
             break
         time.sleep(0.05)
+if cmd == "run" and os.environ.get("STUB_BG"):  # a child that outlives the script, keeping every fd it inherited
+    import subprocess
+    bg = subprocess.Popen(["sleep", "30"], close_fds=False, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    Path(os.environ["STUB_BG"]).write_text(str(bg.pid))
 if cmd == "run" and rc == 0 and not os.environ.get("STUB_NO_RESULT"):
     out = Path(argv[argv.index("--out") + 1])
     out.mkdir(parents=True, exist_ok=True)
@@ -214,3 +219,32 @@ def test_flagged_modules_are_notified_even_when_publish_then_fails(env):
     messages = env.notifications()
     assert len(messages) == 2
     assert "youtube" in messages[0] and "publish" in messages[1]
+
+
+def test_a_child_that_outlives_the_script_does_not_keep_the_lock_held(env, tmp_path):
+    pidfile = tmp_path / "bg.pid"
+    try:
+        assert env.run(STUB_BG=str(pidfile)).returncode == 0
+        assert pidfile.exists() and Path(f"/proc/{pidfile.read_text()}").exists()  # the child is still alive
+        again = env.run()
+        assert "already running" not in again.stdout
+        assert env.calls().count("run") == 2
+    finally:
+        if pidfile.exists():
+            subprocess.run(["kill", pidfile.read_text()], check=False)
+
+
+def test_an_already_running_lock_held_for_hours_is_notified(env):
+    env.data.mkdir(parents=True)
+    (env.data / "cron.started").write_text(str(int(time.time()) - 10 * 3600))
+    holder = subprocess.Popen(["flock", str(env.data / "cron.lock"), "sleep", "30"])
+    try:
+        time.sleep(0.5)
+        done = env.run()
+        assert done.returncode == 0 and "already running" in done.stdout
+        [message] = env.notifications()
+        assert "already running" in message and "10" in message  # says for how many hours
+        assert env.calls() == []
+    finally:
+        holder.kill()
+        holder.wait()

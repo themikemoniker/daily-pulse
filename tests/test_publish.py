@@ -221,6 +221,7 @@ def test_a_site_that_contains_the_data_dir_is_refused(make_env, remote, capsys):
     cfg, data, _ = make_env(sources=())
     (data / "state").mkdir(parents=True)
     (data / "state" / "x.html").write_text("x")
+    (data.parent / "index.html").write_text("x")
     assert_refused(cfg, data.parent, remote, capsys, "data directory")
 
 
@@ -229,3 +230,17 @@ def test_more_secret_env_names_are_covered(cfg, site, remote, capsys, monkeypatc
     monkeypatch.setenv(name, "s3cr3t-value-123")
     (site / "index.html").write_text("<html>s3cr3t-value-123</html>")
     assert_refused(cfg, site, remote, capsys, "looks like a secret")
+
+
+@pytest.mark.parametrize("make", ["empty", "no_index"])
+def test_an_empty_or_index_less_site_is_refused_and_the_live_branch_is_untouched(cfg, site, remote, tmp_path,
+                                                                                capsys, make):
+    assert publish(cfg, site, remote) == 0
+    live = git(remote, "rev-parse", "gh-pages")
+    blank = tmp_path / "blank"
+    blank.mkdir()
+    if make == "no_index":
+        (blank / "style.css").write_text("body{}\n")
+    assert publish(cfg, blank, remote) == 1
+    assert "index.html" in capsys.readouterr().err
+    assert git(remote, "rev-parse", "gh-pages") == live

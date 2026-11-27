@@ -13,6 +13,7 @@
 #   DAILY_PULSE_SITE     the built site directory     (default: <repo>/site)
 #   DAILY_PULSE_REMOTE   git remote to publish to     (default: the repo's origin)
 #   DAILY_PULSE_NOTIFY   the notifier command         (default: ~/bin/notify)
+#   DAILY_PULSE_STALE_HOURS  notify when "already running" persists this long (default: 3)
 #   DAILY_PULSE_DATE     the run date, YYYY-MM-DD     (default: today)
 set -u
 
@@ -36,7 +37,7 @@ log() { printf '%s run-daily: %s\n' "$(date '+%F %T')" "$*"; }
 
 notify() {  # one short line; never fails the script, never carries command output
     if [ -x "$NOTIFY" ]; then
-        "$NOTIFY" -t daily-pulse -- "$1" >/dev/null 2>&1 || log "notify command failed"
+        "$NOTIFY" -t daily-pulse -- "$1" >/dev/null 2>&1 9>&- || log "notify command failed"
     else
         log "notify command not found: $NOTIFY"
     fi
@@ -53,11 +54,21 @@ mkdir -p "$DATA_DIR" || { log "cannot create $DATA_DIR"; exit 1; }
 exec 9>"$DATA_DIR/cron.lock" || { log "cannot open the lock file in $DATA_DIR"; exit 1; }
 if ! flock -n 9; then
     log "already running; exiting without changes"
+    # A run that has held the lock for hours is stuck (or something leaked the lock): say so.
+    started=$(cat "$DATA_DIR/cron.started" 2>/dev/null || true)
+    case $started in
+        ''|*[!0-9]*) ;;
+        *) hours=$(( ($(date +%s) - started) / 3600 ))
+           if [ "$hours" -ge "${DAILY_PULSE_STALE_HOURS:-3}" ]; then
+               notify "daily-pulse $DATE: still 'already running' after ${hours}h; the site is not updating"
+           fi ;;
+    esac
     exit 0
 fi
+date +%s > "$DATA_DIR/cron.started"
 
 log "starting $DATE"
-"$BIN" run --config "$CONFIG" --out "$OUT" --date "$DATE" || fail "run" "$?"
+"$BIN" run --config "$CONFIG" --out "$OUT" --date "$DATE" 9>&- || fail "run" "$?"
 
 RESULT=$OUT/run-$DATE.json
 if [ ! -f "$RESULT" ]; then
@@ -81,8 +92,8 @@ if [ -n "$FLAGGED" ]; then
     notify "daily-pulse $DATE: failing twice in a row: ${FLAGGED//,/, }"
 fi
 
-"$BIN" digest --config "$CONFIG" --out "$OUT" --date "$DATE" || fail "digest" "$?"
+"$BIN" digest --config "$CONFIG" --out "$OUT" --date "$DATE" 9>&- || fail "digest" "$?"
 "$BIN" publish --config "$CONFIG" --out "$OUT" --site "$SITE" --date "$DATE" \
-    ${DAILY_PULSE_REMOTE:+--remote "$DAILY_PULSE_REMOTE"} || fail "publish" "$?"
+    ${DAILY_PULSE_REMOTE:+--remote "$DAILY_PULSE_REMOTE"} 9>&- || fail "publish" "$?"
 
 log "done $DATE"

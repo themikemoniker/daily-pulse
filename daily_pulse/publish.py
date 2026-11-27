@@ -38,6 +38,8 @@ def _secret_env_values() -> list[str]:
 def check_site(site: Path, forbidden: tuple[Path, ...] = ()) -> None:
     """Raise PublishError unless every file in `site` is plain site content with no secrets in it.
     `forbidden` are directories (the data dir) the site must not live in or contain."""
+    if not (site / "index.html").is_file():  # an empty or wrong directory must not replace the live site
+        raise PublishError(f"{site} has no index.html; refusing to publish an empty site")
     real = site.resolve()
     for bad in forbidden:
         bad = bad.resolve()
