@@ -1,0 +1,16 @@
+WEBVTT
+
+NOTE this is a comment block
+that spans two lines
+
+STYLE
+::cue { color: white }
+
+1
+00:00:01.000 --> 00:00:04.000
+Hello and welcome.
+
+2
+00:00:04.500 --> 00:00:08.000
+We build a <i>maker</i>-checker loop.
+It reviews its own work.

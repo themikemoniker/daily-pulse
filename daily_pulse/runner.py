@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from daily_pulse.adapters import registry
-from daily_pulse.adapters.base import AdapterContext
+from daily_pulse.adapters.base import AdapterContext, ItemDeferred, ItemSkipped
 from daily_pulse.config import Config
 from daily_pulse.state import FailureCounters, StateError, StateStore, serialize_json
+from daily_pulse.summarizer import Summarizer
 
 log = logging.getLogger("daily_pulse")
 
@@ -56,6 +57,13 @@ def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list) -> Excep
             # Prove the item can be reported *before* it is marked processed, so a bad
             # item is retried next run instead of being consumed and lost.
             serialize_json(item.to_dict())
+        except ItemDeferred as deferred:
+            log.info("%s: item %s deferred to the next run: %s", name, candidate.id, deferred)
+            continue
+        except ItemSkipped as skipped:
+            log.warning("%s: item %s skipped for good: %s", name, candidate.id, skipped)
+            state.mark_processed(name, candidate.id)
+            continue
         except Exception as exc:  # noqa: BLE001
             log.error("%s: item %s failed\n%s", name, candidate.id, traceback.format_exc())
             error = error or exc
@@ -101,17 +109,21 @@ def _run_source(name, source_cfg, config, ctx, state, failures, result) -> None:
 
 
 def run_pipeline(
-    config: Config, date: str, fixtures_dir: Path | None, dry_run: bool = False
+    config: Config, date: str, fixtures_dir: Path | None, dry_run: bool = False,
+    out_dir: Path | None = None,
 ) -> RunResult:
     """Run every enabled adapter. StateError while reading state at startup propagates;
     one raised mid-run stops the run but is returned in result.error with what was done."""
     result = RunResult(date=date)
     state = StateStore(config.data_dir, persist=not dry_run)
     failures = FailureCounters(config.data_dir, persist=not dry_run)
+    summarizer = Summarizer.from_config(config)  # one per run, so its call cap spans all sources
+    notes_dir = None if out_dir is None else Path(out_dir) / "notes"
     for name, source_cfg in config.sources.items():
         ctx = AdapterContext(
             config=source_cfg, fixtures_dir=fixtures_dir, date=date,
             data_dir=config.data_dir, persist=not dry_run,
+            notes_dir=notes_dir, summarizer=summarizer,
         )
         try:
             _run_source(name, source_cfg, config, ctx, state, failures, result)

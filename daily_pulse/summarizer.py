@@ -19,7 +19,7 @@ from pathlib import Path
 
 from daily_pulse.config import Config
 from daily_pulse.models import VERDICTS, Beat, Item, Rating
-from daily_pulse.notes import NoteError, write_note
+from daily_pulse.notes import TIMESTAMP, NoteError, write_note
 from daily_pulse.quoteguard import QuoteBudget, guard_fields
 
 log = logging.getLogger("daily_pulse")
@@ -31,7 +31,6 @@ DEFAULT_MAX_CALLS = 30
 DEFAULT_TIMEOUT = 300.0  # seconds per call
 ATTEMPTS = 2  # the first call plus one retry
 
-_TIMESTAMP = re.compile(r"[0-9]{1,2}:[0-5][0-9](:[0-5][0-9])?")
 _FENCE = re.compile(r"\A```[A-Za-z]*\n(.*)\n```\Z", re.S)
 
 
@@ -86,7 +85,7 @@ def parse_reply(text: str, item: Item) -> Rating:
     for beat in beats:
         if not (isinstance(beat, dict) and isinstance(beat.get("text"), str)
                 and beat["text"].strip()
-                and isinstance(beat.get("timestamp"), str) and _TIMESTAMP.fullmatch(beat["timestamp"])):
+                and isinstance(beat.get("timestamp"), str) and TIMESTAMP.fullmatch(beat["timestamp"])):
             raise BadReply(f"bad beat {beat!r}")
         parsed_beats.append(Beat(beat["timestamp"], beat["text"]))
     is_video = item.source in VIDEO_SOURCES
