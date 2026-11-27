@@ -1,0 +1,47 @@
+{
+  "/users/by/username/demo_alpha": {"status": 200, "body": {"data": {"id": "1001", "username": "demo_alpha", "name": "Demo Alpha"}}},
+  "/users/by/username/demo_beta": {"status": 200, "body": {"data": {"id": "1002", "username": "demo_beta", "name": "Demo Beta"}}},
+  "/users/by/username/demo_gamma": {"status": 200, "body": {"data": {"id": "1003", "username": "demo_gamma", "name": "Demo Gamma"}}},
+  "/users/1001/tweets": {"status": 200, "body": {
+    "data": [
+      {"id": "9000000000000000003", "created_at": "2026-01-15T09:00:00.000Z", "author_id": "1001",
+       "text": "Invented long post about a made up agent loop experiment. Invented long post about a made up agent loop experiment. Invented long post about a made up agent loop experiment. Invented long post about a made up agent loop experiment. Invented long post about a made up agent loop experiment. FULLTEXT-MARKER",
+       "public_metrics": {"like_count": 12, "retweet_count": 3, "reply_count": 1, "quote_count": 0}},
+      {"id": "9000000000000000002", "created_at": "2026-01-15T08:00:00.000Z", "author_id": "1001",
+       "text": "RT @demo_beta: Invented original post about tiny eval harnesses and why they sta…",
+       "public_metrics": {"like_count": 0, "retweet_count": 40, "reply_count": 0, "quote_count": 0},
+       "referenced_tweets": [{"type": "retweeted", "id": "9000000000000000100"}]},
+      {"id": "9000000000000000001", "created_at": "2026-01-14T20:00:00.000Z", "author_id": "1001",
+       "text": "Invented note: a fixture is just a recorded answer.",
+       "public_metrics": {"like_count": 5, "retweet_count": 1, "reply_count": 0, "quote_count": 0}}
+    ],
+    "includes": {
+      "tweets": [
+        {"id": "9000000000000000100", "author_id": "1002", "created_at": "2026-01-14T12:00:00.000Z",
+         "text": "Invented original post about tiny eval harnesses and why they stay small. FULLORIGINAL-MARKER",
+         "public_metrics": {"like_count": 250, "retweet_count": 40, "reply_count": 9, "quote_count": 0}}
+      ],
+      "users": [{"id": "1002", "username": "demo_beta", "name": "Demo Beta"}]
+    },
+    "meta": {"result_count": 3}
+  }},
+  "/users/1002/tweets": {"status": 200, "body": {
+    "data": [
+      {"id": "9000000000000000200", "created_at": "2026-01-15T07:00:00.000Z", "author_id": "1002",
+       "text": "Invented beta post: caps keep costs predictable.",
+       "public_metrics": {"like_count": 7, "retweet_count": 2, "reply_count": 0, "quote_count": 0}},
+      {"id": "9000000000000000201", "created_at": "2026-01-14T07:00:00.000Z", "author_id": "1002",
+       "text": "Invented older beta post.",
+       "public_metrics": {"like_count": 1, "retweet_count": 0, "reply_count": 0, "quote_count": 0}}
+    ],
+    "meta": {"result_count": 2}
+  }},
+  "/users/1003/tweets": {"status": 200, "body": {
+    "data": [
+      {"id": "9000000000000000300", "created_at": "2026-01-15T06:00:00.000Z", "author_id": "1003",
+       "text": "Invented gamma post.",
+       "public_metrics": {"like_count": 0, "retweet_count": 0, "reply_count": 0, "quote_count": 0}}
+    ],
+    "meta": {"result_count": 1}
+  }}
+}

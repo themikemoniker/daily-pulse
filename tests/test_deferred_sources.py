@@ -60,7 +60,8 @@ def test_x_reports_deferred_and_never_fails_the_run(make_env, fixtures_dir):
     cfg, data, out = make_env(sources=("x",))
     assert run(cfg, out, fixtures_dir) == 0
     src = result(out)["sources"]["x"]
-    assert src["status"] == "deferred: no usable read route"
+    # X is now an opt-in paid adapter: the status names what is missing instead of "no usable read route"
+    assert src["status"].startswith("deferred: ") and "paid_api_approved" in src["status"]
     assert src["items"] == []
 
 
@@ -181,11 +182,12 @@ def test_instagram_items_are_rated_through_the_summarizer_saved_first(tmp_path, 
     assert (tmp_path / "notes/2026-01-15/instagram-S1.md").exists()
 
 
-def test_x_handles_stay_in_config_for_later():
+def test_x_handles_are_ignored_and_x_stays_deferred_until_opted_in():
     adapter = XAdapter()
     from daily_pulse.adapters.base import AdapterContext
     ctx = AdapterContext(config={"enabled": True, "handles": ["swyx"]})
-    assert adapter.status(ctx) == "deferred: no usable read route"
+    status = adapter.status(ctx)  # handles are display names: only `usernames` is read
+    assert status.startswith("deferred: ") and "paid_api_approved" in status and "usernames" in status
     assert adapter.list_new(ctx) == []
 
 
