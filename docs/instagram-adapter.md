@@ -35,3 +35,20 @@ The command must print a JSON list to stdout and exit 0:
   is never written to notes, the digest or the site.
 - With `--fixtures`, `<fixtures>/instagram/items.json` (same format) is read instead of running
   the command.
+
+## Using the Meta connector: `scripts/ig-export.py`
+
+If the owner's Instagram account is linked through the Meta connector CLI (`instagram-cli`), this
+script is a ready-made command for the adapter. It lists `saved-posts` then `recently-liked-posts`
+(newest first, reels only) and prints the JSON above. It never requests the connector's AI "media
+understanding" narratives, only metadata and the caption.
+
+```
+export IG_CLI_CMD="python3 /path/to/daily-pulse/scripts/ig-export.py"
+export IG_ACCOUNT_ID=...        # from `instagram-cli accounts`; keep it out of the repo
+export INSTAGRAM_CLI=...        # optional: the connector's path (default: instagram-cli on PATH)
+export IG_EXPORT_LIMIT=20       # optional: most items per kind
+```
+
+"Liked" is the connector's *recently* liked list only (no full history). Errors name the failing
+step but never print the account id.
