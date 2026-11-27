@@ -97,6 +97,7 @@ class GitHubAdapter(SourceAdapter):
         self._exhausted: dict = {}
         self._errors: list = []
         self._stars: dict = {}
+        self._push_min_stars, self._ignore = DEFAULT_PUSH_MIN_STARS, []  # set per run by list_new
         self.last_run: dict = {"degraded": False, "reason": ""}
 
     def _now(self, ctx: AdapterContext) -> datetime:
@@ -256,7 +257,8 @@ class GitHubAdapter(SourceAdapter):
             "q": f"created:>{since}", "sort": "stars", "order": "desc", "per_page": 10})
         if status != 200 or not isinstance(body, dict) or not isinstance(body.get("items"), list):
             return []
-        return [self._repo_item("rising", r, now, r["created_at"]) for r in body["items"]]
+        return [self._repo_item("rising", r, now, r["created_at"]) for r in body["items"]
+                if not self._ignored(str(r.get("full_name", "")))]
 
     # -- watched accounts ----------------------------------------------------------------
 
@@ -313,6 +315,8 @@ class GitHubAdapter(SourceAdapter):
         return item
 
     def _releases(self, ctx, now, full_name) -> list[Item]:
+        if self._ignored(full_name):
+            return []
         lookback = int(ctx.config.get("lookback_days", 7))
         status, body = self._get(ctx, f"/repos/{full_name}/releases", {"per_page": 5})
         if status != 200 or not isinstance(body, list):

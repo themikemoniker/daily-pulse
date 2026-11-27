@@ -73,6 +73,19 @@ def test_an_ignored_repo_produces_no_items_at_all(fixtures_dir, tmp_path):
     assert any("alice/active" in i.id for i in listed(fixtures_dir, tmp_path))  # and only because of the setting
 
 
+def test_an_ignored_repo_is_dropped_from_watch_repos_and_from_the_rising_search_too(fixtures_dir, tmp_path):
+    base = {i.id for i in listed(fixtures_dir, tmp_path)}
+    assert "release:bob/tool:v0.3.0" in base and "rising:newrepo/agent-evals" in base
+    ids = {i.id for i in listed(fixtures_dir, tmp_path, ignore_repos=["bob/tool", "newrepo/*"])}
+    assert not any("bob/tool" in i or "newrepo/agent-evals" in i for i in ids)
+    assert "rising:other/gizmo" in ids  # the rest of the search results stay
+
+
+def test_a_fresh_adapter_has_default_noise_settings():
+    adapter = GitHubAdapter()
+    assert adapter._push_min_stars == 25 and adapter._ignore == []
+
+
 def test_ignore_globs_are_case_insensitive_and_match_whole_names(fixtures_dir, tmp_path):
     assert any("alice/active" in i.id for i in listed(fixtures_dir, tmp_path, ignore_repos=["alice/act"]))
     assert not any("alice/active" in i.id for i in listed(fixtures_dir, tmp_path, ignore_repos=["alice/*"]))
