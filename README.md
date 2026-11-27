@@ -31,3 +31,11 @@ Items are ranked by rating (newest first on ties); items rated 9+ and under 48 h
 CSS/JS); links are absolute, built from `site.base_url` in the config. Item ages are measured from the run's
 `generated_at` (recorded in `run-<date>.json`; falls back to the end of the date, UTC), so rebuilding a date gives
 identical files.
+
+## Summarizer
+
+- `daily_pulse.summarizer.Summarizer` rates one item by running `claude -p` with the prompt on stdin: `prompts/rubric.md` (the rubric, in every call) plus `prompts/summarize.md` (the task and the strict-JSON reply format). Both files are read on every call, so editing them needs no code change. `summarize_items(summarizer, items, notes_dir, date, transcripts=None)` rates each item and passes the result to `write_note`.
+- The reply must be one JSON object: summary, takeaways, beats (with timestamps), rating (integer 1-10), reason, verdict (`watch`, `skim` or `skip`), tags, diamond flag with reason, optional quotes. An invalid reply, a failed or timed-out process, or a note the writer refuses leaves that item "unrated" (logged) and the run carries on. A malformed reply is retried once.
+- `[summarizer] max_calls` (default 30) caps `claude -p` calls per run, retries included. Once reached, remaining items are unrated.
+- The binary is `[summarizer] claude_cmd` or, if set, `$DAILY_PULSE_CLAUDE` (a command string; tests point it at a fake script). Tests never run the real `claude`.
+- Returned ratings pass through the quote guard against the transcript and the item excerpt: no run of more than 40 copied words, and quoted words capped under 50 per item. Not yet called by the runner; the digest ticket plugs in.

@@ -19,6 +19,8 @@ class Config:
     alert_after_failures: int = 2
     base_url: str = ""  # public site root; digest links are built from it
     sources: dict[str, dict] = field(default_factory=dict)
+    claude_cmd: str = "claude"
+    max_claude_calls: int = 30
 
 
 def _table(raw: dict, key: str) -> dict:
@@ -47,6 +49,10 @@ def load_config(path: Path) -> Config:
     base_url = site.get("base_url", "")
     if not isinstance(base_url, str):
         raise ConfigError(f"site.base_url must be a string, got {base_url!r}")
+    summarizer = _table(raw, "summarizer")
+    claude_cmd = summarizer.get("claude_cmd", "claude")
+    if not isinstance(claude_cmd, str) or not claude_cmd.strip():
+        raise ConfigError(f"summarizer.claude_cmd must be a non-empty string, got {claude_cmd!r}")
     data_dir = paths.get("data_dir", "data")
     if not isinstance(data_dir, str) or not data_dir:
         raise ConfigError(f"paths.data_dir must be a non-empty string, got {data_dir!r}")
@@ -61,4 +67,6 @@ def load_config(path: Path) -> Config:
         alert_after_failures=_int(run, "alert_after_failures", 2, 1, "run.alert_after_failures"),
         base_url=base_url.strip(),
         sources=sources,
+        claude_cmd=claude_cmd,
+        max_claude_calls=_int(summarizer, "max_calls", 30, 0, "summarizer.max_calls"),
     )
