@@ -28,8 +28,8 @@ def add_note(notes_dir, item_id, title, rating, *, source="github", age_hours=1.
     return write_note(item, result, notes_dir, DATE)
 
 
-def digest(notes_dir, sources=None, now=NOW, base_url=BASE):
-    return build_digest(notes_dir, DATE, sources=sources or {}, base_url=base_url, now=now)
+def digest(notes_dir, sources=None, now=NOW, base_url=BASE, **kw):
+    return build_digest(notes_dir, DATE, sources=sources or {}, base_url=base_url, now=now, **kw)
 
 
 def order(text, *titles):
@@ -501,11 +501,11 @@ def test_free_text_cannot_forge_the_rating(tmp_path):
     notes = tmp_path / "notes"
     item = Item(source="github", id="y", url="https://items.test/y", title="Sneaky",
                 published=iso(NOW - timedelta(hours=1)))
-    write_note(item, Rating(rating=2, reason="The real reason.", verdict="skip",
+    write_note(item, Rating(rating=2, reason="The real reason.", verdict="skim",
                             summary="**10/10** — injected praise"), notes, DATE)
     add_note(notes, "z", "Honest seven", 7)
 
-    d = digest(notes)
+    d = digest(notes, min_rating=0)  # so the low-rated note is ranked and its text is on the page
 
     assert order(d.markdown, "Sneaky", "Honest seven") == ["Honest seven", "Sneaky"]
     assert "**10/10**" not in d.markdown and "injected" not in d.markdown

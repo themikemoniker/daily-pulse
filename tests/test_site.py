@@ -290,7 +290,7 @@ def test_write_failure_fails_the_build(tmp_path):
 def test_deleted_note_disappears_from_the_site(tmp_path):
     out, site = tmp_path / "out", tmp_path / "site"
     gone = add_note(out, "a", "Doomed", 5)
-    add_note(out, "b", "Kept", 4)
+    add_note(out, "b", "Kept", 6)
     build_site(out, site, DAY)
     assert (site / "notes" / DAY / "youtube-a.html").is_file()
 

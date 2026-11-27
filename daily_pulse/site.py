@@ -13,8 +13,8 @@ import re
 from datetime import date as _date
 from pathlib import Path
 
-from daily_pulse.digest import (Entry, _default_now, _load, _safe_url, _status_lines, is_diamond,
-                                parse_time)
+from daily_pulse.digest import (DEFAULT_MIN_RATING, Entry, _default_now, _load, _safe_url, _status_lines,
+                                also_seen_label, is_diamond, parse_time, split_ranked)
 from daily_pulse.notes import _write_atomic
 
 CSS = """\
@@ -42,6 +42,8 @@ ol.items, ul.plain { list-style: none; padding: 0; margin: 0; }
   margin: 8px 0; font-weight: bold; }
 blockquote { margin: 8px 0; padding-left: 12px; border-left: 3px solid var(--rule); color: var(--muted); }
 ul { padding-left: 1.25rem; }
+details.also-seen { margin: 16px 0; color: var(--muted); }
+details.also-seen summary { cursor: pointer; }
 """
 
 
@@ -112,14 +114,16 @@ def _item_html(e: Entry, date: str, root: str, diamond: bool) -> str:
     )
 
 
-def _run_info(site: Path, day: str) -> tuple[dict, object]:
-    """Source statuses and the run's timestamp for `day`, from the site's own copy."""
+def _run_info(site: Path, day: str) -> tuple[dict, object, int | None]:
+    """Source statuses, the run's timestamp and its `min_rating` for `day`, from the site's own copy."""
     try:
         recorded = json.loads((site / "runs" / f"{day}.json").read_text(encoding="utf-8"))
         sources = recorded.get("sources", {})
-        return (sources if isinstance(sources, dict) else {}), parse_time(recorded.get("generated_at"))
+        threshold = recorded.get("min_rating")
+        threshold = threshold if isinstance(threshold, int) and not isinstance(threshold, bool) else None
+        return (sources if isinstance(sources, dict) else {}), parse_time(recorded.get("generated_at")), threshold
     except (OSError, ValueError, AttributeError):
-        return {}, None
+        return {}, None, None
 
 
 def _copy_run_info(out: Path, site: Path, day: str) -> None:
@@ -133,15 +137,37 @@ def _copy_run_info(out: Path, site: Path, day: str) -> None:
     except (OSError, ValueError, AttributeError, KeyError, TypeError):
         return
     payload = {"generated_at": stamp if isinstance(stamp, str) else "", "sources": sources}
+    threshold = raw.get("min_rating")
+    if isinstance(threshold, int) and not isinstance(threshold, bool):
+        payload["min_rating"] = threshold
     _write_atomic(site / "runs" / f"{day}.json", json.dumps(payload, indent=2, sort_keys=True) + "\n", 0o644)
 
 
-def _day_body(site: Path, date: str, root: str) -> str:
+def _ranked_entries(site: Path, day: str, min_rating: int | None) -> tuple[list[Entry], list[Entry]]:
+    """(ranked, below threshold) for a day. The threshold is the one given, else the one recorded
+    for that day's run, else the shipped default."""
+    if min_rating is None:
+        min_rating = _run_info(site, day)[2]
+    return split_ranked(_load(site / "notes", day), DEFAULT_MIN_RATING if min_rating is None else min_rating)
+
+
+def _also_seen(below: list[Entry], date: str, root: str) -> str:
+    if not below:
+        return ""
+    links = "".join(f'<li><a href="{_h(f"{root}notes/{date}/{e.stem}.html")}">{_h(e.title)}</a> '
+                    f'<span class="meta">{e.rating}/10 · {_h(e.verdict)}</span></li>' for e in below)
+    return (f'<details class="also-seen"><summary>{_h(also_seen_label(len(below)))}</summary>'
+            f'<ul class="plain">{links}</ul></details>')
+
+
+def _day_body(site: Path, date: str, root: str, min_rating: int | None = None) -> str:
     entries = _load(site / "notes", date)
-    sources, now = _run_info(site, date)
+    ranked_entries, below = _ranked_entries(site, date, min_rating)
+    sources, now, _ = _run_info(site, date)
     now = now or _default_now(date)
-    rows = "\n".join(_item_html(e, date, root, is_diamond(e, now)) for e in entries)
+    rows = "\n".join(_item_html(e, date, root, is_diamond(e, now)) for e in ranked_entries)
     ranked = f'<ol class="items">\n{rows}\n</ol>' if rows else "<p>No items today.</p>"
+    ranked += _also_seen(below, date, root)
     status = "".join(f"<li><strong>{_h(n)}</strong>: {_h(s)}</li>" for n, s in _status_lines(entries, sources))
     digests = site / "digests"
     links = [f'<a href="{root}digests/{date}.{ext}">digest ({ext})</a>' for ext in ("md", "html")
@@ -233,9 +259,12 @@ def _copy_inputs(out: Path, site: Path) -> None:
                 _copy_file(src, site / "digests" / src.name)
 
 
-def build_site(out: Path, site: Path, date: str) -> list[Path]:
+def build_site(out: Path, site: Path, date: str, min_rating: int | None = None) -> list[Path]:
     """Build `site/` from `out/notes`, `out/digests` and `out/run-<date>.json`. `date` is the day
-    shown on `index.html`. Returns the pages written (unchanged files are left untouched)."""
+    shown on `index.html`. Returns the pages written (unchanged files are left untouched).
+    Only items rated at least `min_rating` (and not "skip") are ranked; the others sit in a collapsed
+    "Also seen" line and keep their note pages. `min_rating` defaults, per day, to the value recorded
+    with that day's run, else the shipped default."""
     out, site = Path(out), Path(site)
     _copy_inputs(out, site)
     _copy_run_info(out, site, date)  # also for a day that has a run but no notes
@@ -244,13 +273,13 @@ def build_site(out: Path, site: Path, date: str) -> list[Path]:
     for day in days:
         now = _run_info(site, day)[1] or _default_now(day)
         entries = _load(site / "notes", day)
-        pages[Path("days") / f"{day}.html"] = _page(f"Daily Pulse — {day}", "../", _day_body(site, day, "../"))
+        pages[Path("days") / f"{day}.html"] = _page(f"Daily Pulse — {day}", "../", _day_body(site, day, "../", min_rating))
         for e in entries:
             pages[Path("notes") / day / f"{e.stem}.html"] = _note_page(site, day, e, now)
-    pages[Path("index.html")] = _page(f"Daily Pulse — {date}", "", _day_body(site, date, ""))
+    pages[Path("index.html")] = _page(f"Daily Pulse — {date}", "", _day_body(site, date, "", min_rating))
     rows = []
     for day in days:
-        n = len(_load(site / "notes", day))
+        n = len(_ranked_entries(site, day, min_rating)[0])
         rows.append(f'<li class="item"><a href="../days/{day}.html">{day}</a> '
                     f'<span class="meta">{n} item{"" if n == 1 else "s"}</span></li>')
     pages[Path("archive") / "index.html"] = _page(

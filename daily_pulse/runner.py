@@ -22,12 +22,15 @@ class RunResult:
     date: str
     sources: dict[str, dict] = field(default_factory=dict)
     flagged: list[str] = field(default_factory=list)
+    min_rating: int | None = None  # the rating threshold in force; the digest and site rank by it
     error: str | None = None  # set when a state error aborted the run part-way
     generated_at: str = field(  # when the run happened (UTC); the digest measures item ages from it
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
     def to_dict(self) -> dict:
         out = {"date": self.date, "generated_at": self.generated_at, "sources": self.sources, "flagged": self.flagged}
+        if self.min_rating is not None:
+            out["min_rating"] = self.min_rating
         if self.error:
             out["error"] = self.error
         return out
@@ -148,7 +151,7 @@ def run_pipeline(
 ) -> RunResult:
     """Run every enabled adapter. StateError while reading state at startup propagates;
     one raised mid-run stops the run but is returned in result.error with what was done."""
-    result = RunResult(date=date)
+    result = RunResult(date=date, min_rating=config.quality.min_rating)
     state = StateStore(config.data_dir, persist=not dry_run)
     failures = FailureCounters(config.data_dir, persist=not dry_run)
     summarizer = Summarizer.from_config(config)  # one per run, so its call cap spans all sources
