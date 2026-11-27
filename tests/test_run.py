@@ -1,0 +1,595 @@
+import json
+
+from daily_pulse.adapters import registry
+from daily_pulse.cli import main
+from conftest import FakeAdapter
+
+
+def run(cfg, out, fixtures, *extra):
+    return main(["run", "--config", str(cfg), "--fixtures", str(fixtures), "--out", str(out),
+                 "--date", "2026-01-15", *extra])
+
+
+def result(out):
+    return json.loads((out / "run-2026-01-15.json").read_text())
+
+
+def test_run_on_fixtures_with_fake_adapter_exits_zero_and_reports_items(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+    res = result(out)
+    assert res["date"] == "2026-01-15"
+    assert res["sources"]["fake"]["status"] == "ok"
+    assert [i["id"] for i in res["sources"]["fake"]["items"]] == ["a1", "a2"]
+    assert res["sources"]["fake"]["items"][0]["text"] == "excerpt for a1"
+
+
+def test_second_run_with_same_state_finds_nothing_new(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+    assert run(cfg, out, fixtures_dir) == 0
+    assert result(out)["sources"]["fake"]["items"] == []
+
+
+def test_raising_adapter_is_logged_and_counted_and_others_still_run(make_env, fixtures_dir):
+    registry.register(FakeAdapter("boom", fail_list=True))
+    registry.register(FakeAdapter("fake"))
+    (fixtures_dir / "boom").mkdir()
+    cfg, data, out = make_env(sources=("boom", "fake"))
+    assert run(cfg, out, fixtures_dir) == 0
+    res = result(out)
+    assert res["sources"]["boom"]["status"] == "failed"
+    assert "boom exploded" in res["sources"]["boom"]["error"]
+    assert res["sources"]["fake"]["status"] == "ok"
+    assert len(res["sources"]["fake"]["items"]) == 2
+    logs = list((data / "logs").glob("*.log"))
+    assert logs and "boom exploded" in logs[0].read_text()
+    assert "Traceback" in logs[0].read_text()
+
+
+def test_one_bad_item_fails_the_module_but_keeps_other_items(make_env, fixtures_dir):
+    registry.register(FakeAdapter(fail_details_for={"a1"}))
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+    src = result(out)["sources"]["fake"]
+    assert src["status"] == "failed"
+    assert [i["id"] for i in src["items"]] == ["a2"]
+    # the failed item is retried next run; the good one is not reprocessed
+    registry.register(FakeAdapter())
+    assert run(cfg, out, fixtures_dir) == 0
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["a1"]
+
+
+def test_failure_counters_persist_and_two_consecutive_failures_are_flagged(make_env, fixtures_dir):
+    (fixtures_dir / "boom").mkdir()
+    registry.register(FakeAdapter("boom", fail_list=True))
+    cfg, data, out = make_env(sources=("boom",))
+    run(cfg, out, fixtures_dir)
+    first = result(out)
+    assert first["sources"]["boom"]["consecutive_failures"] == 1
+    assert first["flagged"] == []
+    run(cfg, out, fixtures_dir)
+    second = result(out)
+    assert second["sources"]["boom"]["consecutive_failures"] == 2
+    assert second["flagged"] == ["boom"]
+    # a success resets the streak
+    registry.register(FakeAdapter("boom"))
+    (fixtures_dir / "boom" / "items.json").write_text("[]")
+    run(cfg, out, fixtures_dir)
+    third = result(out)
+    assert third["sources"]["boom"]["consecutive_failures"] == 0
+    assert third["flagged"] == []
+
+
+def test_concurrent_run_exits_cleanly_with_message_and_leaves_state_alone(
+    make_env, fixtures_dir, capsys
+):
+    inner = {}
+
+    class Reentrant(FakeAdapter):
+        def list_new(self, ctx):
+            # While the outer run holds the lock, start a second run through the CLI.
+            inner["code"] = run(cfg, tmp_out / "inner", fixtures_dir)
+            return super().list_new(ctx)
+
+    registry.register(Reentrant())
+    cfg, data, out = make_env()
+    tmp_out = out
+    assert run(cfg, out, fixtures_dir) == 0
+    assert inner["code"] == 0
+    assert "another run is in progress" in capsys.readouterr().err
+    assert not (out / "inner").exists()  # the blocked run produced nothing
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["a1", "a2"]
+
+
+def test_lock_is_released_after_a_run(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    run(cfg, out, fixtures_dir)
+    run(cfg, out, fixtures_dir)
+    assert "another run is in progress" not in capsys.readouterr().err
+
+
+def test_deferred_and_unconfigured_adapters_record_status_without_running(make_env, fixtures_dir):
+    class Deferred(FakeAdapter):
+        def status(self, ctx):
+            return "deferred: no route to read other accounts"
+
+        def list_new(self, ctx):
+            raise AssertionError("must not be called")
+
+    class Unconfigured(Deferred):
+        def status(self, ctx):
+            return "not configured"
+
+    registry.register(Deferred("x"))
+    registry.register(Unconfigured("youtube"))
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(sources=("x", "youtube", "fake", "ghost"))
+    assert run(cfg, out, fixtures_dir) == 0
+    srcs = result(out)["sources"]
+    assert srcs["x"]["status"] == "deferred: no route to read other accounts"
+    assert srcs["youtube"]["status"] == "not configured"
+    assert srcs["ghost"]["status"] == "not configured: no adapter registered"
+    assert srcs["fake"]["status"] == "ok"
+    assert result(out)["flagged"] == []
+
+
+def test_disabled_sources_are_skipped(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(sources=(), extra="[sources.fake]\nenabled = false\n")
+    assert run(cfg, out, fixtures_dir) == 0
+    assert result(out)["sources"]["fake"]["status"] == "disabled"
+    assert result(out)["sources"]["fake"]["items"] == []
+
+
+def test_first_run_is_capped_and_the_backlog_is_not_processed_later(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(first_run_cap=1)
+    run(cfg, out, fixtures_dir)
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["a1"]  # newest first
+    run(cfg, out, fixtures_dir)
+    assert result(out)["sources"]["fake"]["items"] == []
+
+
+def test_later_runs_process_all_new_items_uncapped(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(first_run_cap=1)
+    run(cfg, out, fixtures_dir)
+    items = json.loads((fixtures_dir / "fake" / "items.json").read_text())
+    items = [{"id": f"n{k}", "title": "t", "url": "u", "author": "a"} for k in range(3)] + items
+    (fixtures_dir / "fake" / "items.json").write_text(json.dumps(items))
+    run(cfg, out, fixtures_dir)
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["n0", "n1", "n2"]
+
+
+def test_dry_run_reports_but_writes_nothing_and_does_not_mark_items_processed(
+    make_env, fixtures_dir
+):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir, "--dry-run") == 0
+    assert not data.exists()
+    assert not out.exists()
+    assert run(cfg, out, fixtures_dir) == 0
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+
+
+def test_nothing_is_written_to_cwd_data_outside_the_configured_path(
+    make_env, fixtures_dir, tmp_path, monkeypatch
+):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    run(cfg, out, fixtures_dir)
+    assert list(cwd.iterdir()) == []
+    assert (data / "state" / "processed.json").exists()
+
+
+def test_run_never_prompts(make_env, fixtures_dir, monkeypatch):
+    import builtins
+    import sys
+
+    def no_prompt(*a, **k):
+        raise AssertionError("interactive prompt attempted")
+
+    monkeypatch.setattr(builtins, "input", no_prompt)
+    monkeypatch.setattr(sys, "stdin", None)
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+
+
+def test_shipped_config_runs_and_has_the_spec_seed_values(tmp_path, fixtures_dir):
+    import shutil
+    from pathlib import Path
+
+    real = Path(__file__).parent.parent / "config" / "daily-pulse.toml"
+    shipped = tmp_path / "config" / "daily-pulse.toml"  # copy, so data/ lands in tmp_path
+    shipped.parent.mkdir()
+    shutil.copy(real, shipped)
+    out = tmp_path / "out"
+    assert run(shipped, out, fixtures_dir) == 0
+    assert (tmp_path / "data" / "logs").exists()
+    from daily_pulse.config import load_config
+
+    cfg = load_config(shipped)
+    assert cfg.first_run_cap == 10
+    assert {"karpathy", "can1357", "langchain-ai"} <= set(cfg.sources["github"]["watch_accounts"])
+    assert "Simon Willison" in cfg.sources["x"]["handles"]
+    assert cfg.sources["youtube"]["playlist_url"] == ""
+
+
+def test_bad_date_is_rejected_before_anything_is_written(make_env, fixtures_dir, capsys):
+    import pytest
+
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--config", str(cfg), "--fixtures", str(fixtures_dir), "--out", str(out),
+              "--date", "notadate"])
+    assert exc.value.code == 2
+    assert "YYYY-MM-DD" in capsys.readouterr().err
+    assert not data.exists() and not out.exists()
+
+
+def test_missing_config_is_a_clear_error_not_a_traceback(tmp_path, fixtures_dir, capsys):
+    code = main(["run", "--config", str(tmp_path / "nope.toml"), "--out", str(tmp_path / "o")])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "nope.toml" in err and "Traceback" not in err
+
+
+def test_corrupt_state_fails_loudly_without_reprocessing_or_overwriting(
+    make_env, fixtures_dir, capsys
+):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    bad = data / "state" / "processed.json"
+    bad.write_text("{not json")
+    code = run(cfg, out, fixtures_dir)
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "processed.json" in err and "Traceback" not in err
+    assert bad.read_text() == "{not json"  # left for the operator to inspect
+    assert not list(out.glob("run-*.json"))
+
+
+def test_adapter_whose_status_raises_is_isolated_like_any_other_failure(make_env, fixtures_dir):
+    class BadStatus(FakeAdapter):
+        def status(self, ctx):
+            raise RuntimeError("status exploded")
+
+    registry.register(BadStatus("bad"))
+    registry.register(FakeAdapter())
+    (fixtures_dir / "bad").mkdir()
+    cfg, data, out = make_env(sources=("bad", "fake"))
+    assert run(cfg, out, fixtures_dir) == 0
+    srcs = result(out)["sources"]
+    assert srcs["bad"]["status"] == "failed" and "status exploded" in srcs["bad"]["error"]
+    assert srcs["bad"]["consecutive_failures"] == 1
+    assert srcs["fake"]["status"] == "ok"
+
+
+def test_malformed_item_from_adapter_fails_that_module_only(make_env, fixtures_dir):
+    class Malformed(FakeAdapter):
+        def list_new(self, ctx):
+            return [object()]
+
+    registry.register(Malformed("bad"))
+    registry.register(FakeAdapter())
+    (fixtures_dir / "bad").mkdir()
+    cfg, data, out = make_env(sources=("bad", "fake"))
+    assert run(cfg, out, fixtures_dir) == 0
+    assert result(out)["sources"]["bad"]["status"] == "failed"
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+
+
+def test_unwritable_out_fails_before_any_item_is_consumed(make_env, fixtures_dir, tmp_path, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, so out/ cannot be created under it")
+    assert run(cfg, blocker / "out", fixtures_dir) == 1
+    assert "cannot write" in capsys.readouterr().err
+    # nothing was consumed: a rerun with a good --out still finds both items
+    assert run(cfg, out, fixtures_dir) == 0
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+
+
+def test_same_date_rerun_keeps_the_earlier_results(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    run(cfg, out, fixtures_dir)
+    run(cfg, out, fixtures_dir)
+    assert result(out)["sources"]["fake"]["items"] == []  # latest run
+    earlier = json.loads((out / "run-2026-01-15.1.json").read_text())
+    assert [i["id"] for i in earlier["sources"]["fake"]["items"]] == ["a1", "a2"]
+
+
+def test_duplicate_ids_in_one_listing_are_processed_once(make_env, fixtures_dir):
+    class Dupes(FakeAdapter):
+        def list_new(self, ctx):
+            items = super().list_new(ctx)
+            return items + items
+
+    registry.register(Dupes())
+    cfg, data, out = make_env()
+    run(cfg, out, fixtures_dir)
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["a1", "a2"]
+
+
+# --- review feedback (PR #13) -------------------------------------------------------------
+
+def _not_root():
+    import os
+
+    import pytest
+
+    if os.geteuid() == 0:
+        pytest.skip("permission-based tests need a non-root user")
+
+
+def test_empty_first_listing_does_not_end_the_first_run_cap(make_env, fixtures_dir):
+    (fixtures_dir / "fake" / "items.json").write_text("[]")
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(first_run_cap=2)
+    run(cfg, out, fixtures_dir)
+    assert result(out)["sources"]["fake"]["items"] == []
+    big = [{"id": f"b{k}", "title": "t", "url": "u", "author": "a"} for k in range(300)]
+    (fixtures_dir / "fake" / "items.json").write_text(json.dumps(big))
+    run(cfg, out, fixtures_dir)
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["b0", "b1"]
+    run(cfg, out, fixtures_dir)
+    assert result(out)["sources"]["fake"]["items"] == []  # the rest of the backlog stays skipped
+
+
+def test_requires_python_matches_what_the_code_needs():
+    import tomllib
+    from pathlib import Path
+
+    pyproject = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
+    assert pyproject["project"]["requires-python"] == ">=3.11"  # tomllib is 3.11+
+
+
+def test_out_dir_that_rejects_writes_is_caught_before_any_item_is_consumed(
+    make_env, fixtures_dir, capsys
+):
+    _not_root()
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    out.mkdir()
+    out.chmod(0o500)
+    try:
+        assert run(cfg, out, fixtures_dir) == 1
+        assert "cannot write" in capsys.readouterr().err
+    finally:
+        out.chmod(0o700)
+    assert not (data / "state" / "processed.json").exists()
+    assert run(cfg, out, fixtures_dir) == 0
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+
+
+def test_result_write_failure_keeps_earlier_result_and_saves_items_locally(
+    make_env, fixtures_dir, capsys
+):
+    _not_root()
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0  # earlier result for the date, with 2 items
+    earlier = (out / "run-2026-01-15.json").read_text()
+
+    class LockOut(FakeAdapter):
+        def list_new(self, ctx):
+            out.chmod(0o500)  # out becomes unwritable mid-run, after the preflight
+            return [self._item("n1")]
+
+        def _item(self, i):
+            from daily_pulse.models import Item
+
+            return Item(source="fake", id=i, url="u", title="t")
+
+    registry._ADAPTERS["fake"] = LockOut()
+    try:
+        assert run(cfg, out, fixtures_dir) == 1
+    finally:
+        out.chmod(0o700)
+    err = capsys.readouterr().err
+    assert "cannot write result" in err and "run-2026-01-15.unsaved.json" in err
+    assert (out / "run-2026-01-15.json").read_text() == earlier  # not renamed away
+    unsaved = json.loads((data / "logs" / "run-2026-01-15.unsaved.json").read_text())
+    assert [i["id"] for i in unsaved["sources"]["fake"]["items"]] == ["n1"]
+
+
+def test_state_write_failure_aborts_with_a_state_error_not_an_adapter_failure(
+    make_env, fixtures_dir, capsys
+):
+    _not_root()
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    (data / "state").chmod(0o500)
+    try:
+        assert run(cfg, out, fixtures_dir) == 1
+    finally:
+        (data / "state").chmod(0o700)
+    err = capsys.readouterr().err
+    assert "cannot write state" in err and "Traceback" not in err
+    res = result(out)  # the partial result is still written
+    assert res["sources"]["fake"]["status"] == "aborted"
+    assert "cannot write state" in res["error"]
+    assert not (data / "state" / "failures.json").exists()  # the source wasn't blamed
+
+
+def test_invalid_config_values_are_a_clean_error(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(first_run_cap=-1)
+    assert run(cfg, out, fixtures_dir) == 1
+    assert "first_run_cap" in capsys.readouterr().err
+    cfg.write_text(cfg.read_text().replace("first_run_cap = -1", 'first_run_cap = "ten"'))
+    assert run(cfg, out, fixtures_dir) == 1
+    assert "first_run_cap" in capsys.readouterr().err
+    assert not data.exists()
+
+
+def test_state_file_of_the_wrong_shape_is_a_state_error(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    for body in ("[]", "null", '{"fake": "oops"}'):
+        (data / "state" / "processed.json").write_text(body)
+        assert run(cfg, out, fixtures_dir) == 1
+        err = capsys.readouterr().err
+        assert "processed.json" in err and "Traceback" not in err
+
+
+def test_relative_data_dir_is_resolved_against_the_config_file_not_the_cwd(
+    fixtures_dir, tmp_path, monkeypatch
+):
+    registry.register(FakeAdapter())
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    cfg = conf / "c.toml"
+    cfg.write_text('[paths]\ndata_dir = "data"\n[sources.fake]\nenabled = true\n')
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert run(cfg, tmp_path / "out", fixtures_dir) == 0
+    assert (conf / "data" / "state" / "processed.json").exists()
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_unusable_lock_location_is_a_clean_error(make_env, fixtures_dir, tmp_path, capsys):
+    registry.register(FakeAdapter())
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file")
+    cfg, data, out = make_env(extra="")
+    cfg.write_text(cfg.read_text().replace(str(data), str(blocker / "data")))
+    assert run(cfg, out, fixtures_dir) == 1
+    err = capsys.readouterr().err
+    assert "run lock" in err and "Traceback" not in err
+
+
+# --- second review round -----------------------------------------------------------------
+
+def test_adapter_returning_a_non_item_fails_that_item_not_the_run(make_env, fixtures_dir):
+    class ReturnsNone(FakeAdapter):
+        def fetch_details(self, item, ctx):
+            return None if item.id == "a1" else super().fetch_details(item, ctx)
+
+    registry.register(ReturnsNone())
+    registry.register(FakeAdapter("other"))
+    (fixtures_dir / "other").mkdir()
+    (fixtures_dir / "other" / "items.json").write_text((fixtures_dir / "fake" / "items.json").read_text())
+    cfg, data, out = make_env(sources=("fake", "other"))
+    assert run(cfg, out, fixtures_dir) == 0
+    srcs = result(out)["sources"]
+    assert srcs["fake"]["status"] == "failed"
+    assert [i["id"] for i in srcs["fake"]["items"]] == ["a2"]
+    assert len(srcs["other"]["items"]) == 2
+    processed = json.loads((data / "state" / "processed.json").read_text())
+    assert processed["fake"] == ["a2"]  # a1 is retried next run, not silently lost
+
+
+def test_item_that_cannot_be_serialized_is_an_item_failure_and_not_consumed(make_env, fixtures_dir):
+    class BadMetrics(FakeAdapter):
+        def fetch_details(self, item, ctx):
+            item = super().fetch_details(item, ctx)
+            if item.id == "a1":
+                item.metrics = {"views": {1, 2}}  # a set is not JSON
+            return item
+
+    registry.register(BadMetrics())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+    src = result(out)["sources"]["fake"]
+    assert src["status"] == "failed"
+    assert [i["id"] for i in src["items"]] == ["a2"]
+    assert json.loads((data / "state" / "processed.json").read_text())["fake"] == ["a2"]
+
+
+def test_deeper_state_shape_problems_are_state_errors(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    cases = {
+        "processed.json": '{"fake": [["x"]]}',
+        "failures.json": '{"fake": {"consecutive": "many"}}',
+    }
+    for name, body in cases.items():
+        (data / "state" / name).write_text(body)
+        assert run(cfg, out, fixtures_dir) == 1
+        err = capsys.readouterr().err
+        assert name in err and "Traceback" not in err
+        (data / "state" / name).unlink()
+
+
+def test_unusable_log_location_is_a_clean_error(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    data.mkdir()
+    (data / "logs").write_text("a file where the log dir should be")
+    assert run(cfg, out, fixtures_dir) == 1
+    err = capsys.readouterr().err
+    assert "logs" in err and "Traceback" not in err
+    assert not (data / "state" / "processed.json").exists()
+
+
+# --- third round ---------------------------------------------------------------------------
+
+def test_partial_failure_counter_entries_load_and_update(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    (data / "state" / "failures.json").write_text('{"fake": {"total": 3}}')
+    assert run(cfg, out, fixtures_dir) == 0  # success path used to KeyError
+    registry._ADAPTERS["fake"] = FakeAdapter(fail_list=True)
+    assert run(cfg, out, fixtures_dir) == 0  # failure path too
+    assert result(out)["sources"]["fake"]["consecutive_failures"] == 1
+    saved = json.loads((data / "state" / "failures.json").read_text())["fake"]
+    assert saved["total"] == 4
+
+
+def test_same_date_rerun_still_writes_when_hard_links_are_unsupported(
+    make_env, fixtures_dir, monkeypatch
+):
+    import os
+
+    def no_links(*a, **k):
+        raise OSError("hard links not supported")
+
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    run(cfg, out, fixtures_dir)
+    monkeypatch.setattr(os, "link", no_links)
+    assert run(cfg, out, fixtures_dir) == 0
+    earlier = json.loads((out / "run-2026-01-15.1.json").read_text())
+    assert len(earlier["sources"]["fake"]["items"]) == 2
+
+
+def test_item_with_mixed_type_keys_is_rejected_before_it_is_consumed(make_env, fixtures_dir):
+    class MixedKeys(FakeAdapter):
+        def fetch_details(self, item, ctx):
+            item = super().fetch_details(item, ctx)
+            if item.id == "a1":
+                item.metrics = {1: "x", "views": 5}  # json.dumps ok, sort_keys=True fails
+            return item
+
+    registry.register(MixedKeys())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+    assert result(out)["sources"]["fake"]["status"] == "failed"
+    assert json.loads((data / "state" / "processed.json").read_text())["fake"] == ["a2"]
+
+
+def test_enabled_must_be_a_bool(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(sources=(), extra='[sources.fake]\nenabled = "yes"\n')
+    assert run(cfg, out, fixtures_dir) == 1
+    assert "enabled" in capsys.readouterr().err
