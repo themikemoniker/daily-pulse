@@ -2,6 +2,8 @@ import json
 import logging
 import sys
 
+import pytest
+
 from daily_pulse.adapters import registry
 from daily_pulse.adapters.instagram import InstagramAdapter
 from daily_pulse.adapters.x import XAdapter
@@ -10,6 +12,12 @@ from daily_pulse.models import Item
 from daily_pulse.summarizer import Summarizer, summarize_items
 
 DEFAULT_SOURCES = ("x", "instagram")
+
+
+@pytest.fixture(autouse=True)
+def rater(fake_rater):
+    """The runner rates Instagram items; these tests only need a rater that answers."""
+    return fake_rater()
 
 
 def run(cfg, out, fixtures):

@@ -84,19 +84,24 @@ def test_every_source_is_run_and_youtube_reaches_notes_digest_and_site(pipeline)
     assert res["sources"]["instagram"]["status"] == "ok"
     assert res["sources"]["x"]["status"].startswith("deferred")
 
-    notes = sorted(p.name for p in (pipeline.out / "notes" / DATE).glob("*.md"))
-    assert {"youtube-vid1.md", "youtube-vid2.md"} <= set(notes)
-    # GitHub and Instagram items are collected (their ids are in the run result), but the runner
-    # only rates and writes notes for YouTube so far, so they cannot reach the digest yet.
+    notes = {p.name for p in (pipeline.out / "notes" / DATE).glob("*.md")}
+    assert {"youtube-vid1.md", "youtube-vid2.md"} <= notes
+    # GitHub and Instagram items are rated and noted too, so all three live sources reach the digest.
     assert {i["id"] for i in res["sources"]["instagram"]["items"]} == {"S1", "L1"}
-    assert "rising:newrepo/agent-evals" in {i["id"] for i in res["sources"]["github"]["items"]}
+    github_ids = {i["id"] for i in res["sources"]["github"]["items"]}
+    assert "rising:newrepo/agent-evals" in github_ids
+    assert {"instagram-S1.md", "instagram-L1.md"} <= notes
+    assert len(notes) == 2 + 2 + len(github_ids)  # every reported item has exactly one note
 
     digest = (pipeline.out / "digests" / f"{DATE}.md").read_text()
     assert VIDEOS["vid1"] in digest
+    assert "newrepo/agent-evals" in digest
+    assert "Reel by saver (S1)" in digest
     assert "deferred" in digest.lower()  # the digest says X is deferred
     assert (pipeline.out / "digests" / f"{DATE}.html").read_text().startswith(("<!", "<html", "<table", "<div"))
     index = (pipeline.site / "index.html").read_text()
     assert VIDEOS["vid2"] in index
+    assert "newrepo/agent-evals" in index and "Reel by saver (S1)" in index
     assert (pipeline.site / "notes" / DATE / "youtube-vid1.html").exists()
     assert (pipeline.site / "archive" / "index.html").exists()
 

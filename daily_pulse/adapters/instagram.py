@@ -52,6 +52,7 @@ def parse_entries(text: str) -> list[dict]:
 class InstagramAdapter(SourceAdapter):
     name = "instagram"
     quality_gate = True  # channel/title rules and triage; reels are all short, so no duration rule
+    rated_by_runner = True  # rated from the caption and metadata, like any item the runner rates
 
     def __init__(self) -> None:
         self.captions: dict[str, str] = {}  # full captions, for the summarizer only
@@ -104,3 +105,6 @@ class InstagramAdapter(SourceAdapter):
     def fetch_details(self, item: Item, ctx: AdapterContext) -> Item:
         item.text = _excerpt(self.captions.get(item.id, ""))
         return item
+
+    def rating_text(self, item: Item, ctx: AdapterContext) -> str:
+        return self.captions.get(item.id, "")

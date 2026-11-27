@@ -12,7 +12,7 @@ from daily_pulse.adapters.base import AdapterContext, ItemDeferred, ItemSkipped
 from daily_pulse.config import Config
 from daily_pulse.quality import QualityGate, Triager, append_triage_log, decision_records
 from daily_pulse.state import FailureCounters, StateError, StateStore, serialize_json
-from daily_pulse.summarizer import Summarizer
+from daily_pulse.summarizer import Summarizer, summarize_items
 
 log = logging.getLogger("daily_pulse")
 
@@ -62,6 +62,26 @@ def _screen(name, adapter, ctx, state, gate, new, limit, dropped: list) -> list:
     return screened.kept
 
 
+class RatingFailed(Exception):
+    """An item could not be rated or noted; it stays unprocessed and is retried next run."""
+
+
+def _rate_and_note(name, adapter, item, ctx) -> None:
+    """Rate `item` against the rubric and write its note, for sources whose adapter leaves that to
+    the runner (`rated_by_runner`). Returns only once the note is on disk, so the caller may then
+    mark the item processed. Raises ItemDeferred when the per-run call cap is spent (not a fault:
+    the item waits for the next run) and RatingFailed when no valid rating or note came out."""
+    summarizer = ctx.summarizer
+    if summarizer is None or ctx.notes_dir is None:  # never consume an item without a note
+        raise RatingFailed(f"{item.id}: no summarizer or notes directory in the run context")
+    if summarizer.calls_made >= summarizer.max_calls:
+        raise ItemDeferred(f"{item.id}: claude call cap of {summarizer.max_calls} reached, not rated yet")
+    text = adapter.rating_text(item, ctx)
+    result = summarize_items(summarizer, [item], ctx.notes_dir, ctx.date, {item.id: text})[0]
+    if result.status != "rated":
+        raise RatingFailed(f"{item.id}: no rating, will retry next run")
+
+
 def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list, gate=None, dropped=None) -> Exception | None:
     """Process one adapter's new items into `items`. Adapter exceptions are returned (first
     one), never raised. StateError (our own state I/O) propagates: it is not the adapter's fault."""
@@ -84,7 +104,11 @@ def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list, gate=Non
     elif first_run:
         # Don't chew through a backlog: keep the newest few, and mark the rest as seen
         # (in one write) so later runs only handle genuinely new items.
-        state.mark_processed(name, *(c.id for c in new[first_run_cap:]))
+        backlog = [c.id for c in new[first_run_cap:]]
+        if backlog:
+            log.info("%s: first run, %d older item(s) beyond the cap of %d marked seen without notes",
+                     name, len(backlog), first_run_cap)
+        state.mark_processed(name, *backlog)
         new = new[:first_run_cap]
     error = None
     for candidate in new:
@@ -93,6 +117,8 @@ def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list, gate=Non
             # Prove the item can be reported *before* it is marked processed, so a bad
             # item is retried next run instead of being consumed and lost.
             serialize_json(item.to_dict())
+            if adapter.rated_by_runner and ctx.persist:
+                _rate_and_note(name, adapter, item, ctx)
         except ItemDeferred as deferred:
             log.info("%s: item %s deferred to the next run: %s", name, candidate.id, deferred)
             continue
