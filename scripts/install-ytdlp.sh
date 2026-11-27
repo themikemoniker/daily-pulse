@@ -7,8 +7,8 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 venv="$repo/.venv"
 
 if [ ! -x "$venv/bin/pip" ]; then
-  # This host has no python3-venv; virtualenv is installed per user.
-  python3 -m virtualenv -q "$venv"
+  # Prefer the standard library; hosts without python3-venv fall back to a per-user virtualenv.
+  python3 -m venv "$venv" 2>/dev/null || python3 -m virtualenv -q "$venv"
 fi
 
 "$venv/bin/pip" install --quiet --upgrade yt-dlp

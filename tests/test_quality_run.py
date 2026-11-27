@@ -232,3 +232,17 @@ def test_the_triage_log_is_gitignored():
     root = Path(__file__).parent.parent
     proc = subprocess.run(["git", "check-ignore", "-q", "data/triage.jsonl"], cwd=root)
     assert proc.returncode == 0
+
+
+def test_a_gate_that_breaks_never_costs_the_run(env, monkeypatch):
+    from daily_pulse import quality
+
+    def boom(self, *a, **k):
+        raise RuntimeError("gate exploded")
+
+    monkeypatch.setattr(quality.QualityGate, "screen", boom)
+    e = env([rating_reply()], first_run_cap=2)
+    res = e.go(FakeYtDlp(PLAYLIST, subs=SUBS, meta=titled(PLAYLIST)))
+    assert res.sources["youtube"]["status"] == "ok"
+    assert [i["id"] for i in res.sources["youtube"]["items"]] == PLAYLIST[:2]  # the first-run cap still holds
+    assert set(PLAYLIST) <= set(e.processed())

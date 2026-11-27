@@ -46,6 +46,8 @@ def _screen(name, adapter, ctx, state, gate, new, limit, dropped: list) -> list:
                                date=ctx.date, limit=limit)
     except Exception:  # noqa: BLE001 - fail open
         log.error("%s: quality gate failed, items continue unscreened\n%s", name, traceback.format_exc())
+        if limit is not None:
+            state.mark_processed(name, *(i.id for i in new[limit:]))
         return new if limit is None else new[:limit]
     if ctx.persist and ctx.data_dir is not None:
         try:
