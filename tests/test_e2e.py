@@ -104,10 +104,11 @@ def test_every_source_is_run_and_youtube_reaches_notes_digest_and_site(pipeline)
 def test_notes_and_site_never_contain_the_transcript(pipeline):
     pipeline.go()
     transcript_line = "It reviews its own work."  # a caption line from the fixture
-    for root in (pipeline.out, pipeline.site):
-        for f in root.rglob("*"):
-            if f.is_file() and f.suffix in {".md", ".html"}:
-                assert transcript_line not in f.read_text(), f
+    scanned = [f for root in (pipeline.out, pipeline.site) for f in root.rglob("*")
+               if f.is_file() and f.suffix in {".md", ".html"}]
+    assert len(scanned) >= 6  # notes, digests and site pages were really checked
+    for f in scanned:
+        assert transcript_line not in f.read_text(), f
     assert not list(pipeline.site.rglob("transcripts"))
     assert (pipeline.data / "transcripts").exists()  # kept locally only
 
@@ -120,7 +121,8 @@ def test_a_second_run_finds_nothing_new_and_changes_no_output(pipeline):
     pipeline.go()
     assert pipeline.claude.calls == calls  # nothing new, so nothing to summarize
     for name in ("youtube", "github", "instagram"):
-        assert pipeline.result()["sources"][name]["items"] == []
+        src = pipeline.result()["sources"][name]
+        assert src["status"] == "ok" and src["items"] == []
     after = {"out": pipeline.tree(pipeline.out / "notes"), "digests": pipeline.tree(pipeline.out / "digests"),
              "site": pipeline.tree(pipeline.site)}
     assert after == before
@@ -130,10 +132,11 @@ def test_one_failing_source_does_not_hide_the_others(pipeline):
     (pipeline.fixtures / "github" / "responses.json").unlink()  # the GitHub adapter now raises
     pipeline.go()
     res = pipeline.result()
-    assert res["sources"]["github"]["status"] != "ok"
+    assert res["sources"]["github"]["status"] == "failed"
     assert res["sources"]["youtube"]["status"] == "ok"
     digest = (pipeline.out / "digests" / f"{DATE}.md").read_text()
     assert VIDEOS["vid1"] in digest
+    assert "github: failed" in digest  # the reader can see the source failed
     assert VIDEOS["vid2"] in (pipeline.site / "index.html").read_text()
 
 
