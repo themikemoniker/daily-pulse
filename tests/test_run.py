@@ -222,7 +222,7 @@ def test_shipped_config_runs_and_has_the_spec_seed_values(tmp_path, fixtures_dir
     assert cfg.first_run_cap == 10
     assert {"karpathy", "can1357", "langchain-ai"} <= set(cfg.sources["github"]["watch_accounts"])
     assert "Simon Willison" in cfg.sources["x"]["handles"]
-    assert cfg.sources["youtube"]["playlist_url"] == ""
+    assert cfg.sources["youtube"]["playlist_url"].endswith("list=PLOsrHd23kLUo")
 
 
 def test_bad_date_is_rejected_before_anything_is_written(make_env, fixtures_dir, capsys):

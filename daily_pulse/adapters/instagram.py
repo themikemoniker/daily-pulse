@@ -51,6 +51,7 @@ def parse_entries(text: str) -> list[dict]:
 
 class InstagramAdapter(SourceAdapter):
     name = "instagram"
+    quality_gate = True  # channel/title rules and triage; reels are all short, so no duration rule
 
     def __init__(self) -> None:
         self.captions: dict[str, str] = {}  # full captions, for the summarizer only

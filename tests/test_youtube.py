@@ -15,7 +15,7 @@ YT = Path(__file__).parent / "fixtures" / "youtube"
 
 
 def test_rolling_auto_captions_lose_duplicates_and_markup_but_keep_timestamps():
-    cleaned = clean_vtt((YT / "rolling-auto.en.vtt").read_text())
+    cleaned = clean_vtt((YT / "rolling-auto.en.vtt").read_text(), auto=True)
     assert cleaned.splitlines() == [
         "[00:00] welcome to the harness talk",
         "[00:03] today we look at evals",
@@ -74,7 +74,8 @@ class FakeYtDlp:
     """Stands in for yt-dlp: canned playlist, per-video info and captions. Records every call."""
 
     def __init__(self, ids=(), subs=None, fail_info=(), fail_playlist=False, fail_message=None,
-                 upload_date="20260112", live_status=None, fail_all=None):
+                 upload_date="20260112", live_status=None, fail_all=None, meta=None):
+        self.meta = meta or {}  # id -> fields for both the playlist entry and the video info
         self.fail_message = fail_message
         self.upload_date = upload_date
         self.live_status = live_status
@@ -89,7 +90,7 @@ class FakeYtDlp:
         self.calls.append(("playlist", url))
         if self.fail_playlist:
             raise YtDlpError("playlist unavailable")
-        return [{"id": i, "title": f"Title {i}", "channel": "Chan"} for i in self.ids]
+        return [{"id": i, "title": f"Title {i}", "channel": "Chan", **self.meta.get(i, {})} for i in self.ids]
 
     def info(self, url):
         vid = url.rsplit("=", 1)[-1]
@@ -100,7 +101,7 @@ class FakeYtDlp:
             raise YtDlpError(self.fail_message or f"cannot fetch {vid}")
         return {"id": vid, "title": f"Title {vid}", "channel": "Chan", "duration": 754,
                 "upload_date": self.upload_date, "view_count": 4321, "live_status": self.live_status,
-                "description": "A talk about loops.\nSecond line."}
+                "description": "A talk about loops.\nSecond line.", **self.meta.get(vid, {})}
 
     def subtitles(self, url, auto, dest):
         vid = url.rsplit("=", 1)[-1]
@@ -121,7 +122,9 @@ def env(fake_claude, monkeypatch, tmp_path):
         data, out = tmp_path / "state-dir", tmp_path / "out"
         cfg = tmp_path / "config.toml"
         cfg.write_text(f'[run]\nfirst_run_cap = {first_run_cap}\n\n[paths]\ndata_dir = "{data}"\n\n'
-                       '[sources.youtube]\nenabled = true\nplaylist_url = "https://youtube.com/playlist?list=PL1"\n')
+                       '[quality]\nmax_triage_calls = 0  # not about triage here: no triage calls\n\n'
+                       '[sources.youtube]\nenabled = true\nplaylist_url = "https://youtube.com/playlist?list=PL1"\n'
+                       'playlist_order = "newest_first"\n')
         claude = fake_claude(*(claude_replies or [rating_reply()]))
         monkeypatch.setenv("DAILY_PULSE_CLAUDE", str(claude.path))
 
@@ -131,9 +134,9 @@ def env(fake_claude, monkeypatch, tmp_path):
         e = Env()
         e.cfg, e.data, e.out, e.claude = cfg, data, out, claude
 
-        def go(client, date=DATE):
+        def go(client, date=DATE, **kw):
             registry.register(YouTubeAdapter(client=client))
-            return run_pipeline(load_config(cfg), date, None, out_dir=out)
+            return run_pipeline(load_config(cfg), date, None, out_dir=out, **kw)
 
         e.go = go
         e.notes = lambda: sorted((out / "notes" / DATE).glob("*.md")) if (out / "notes" / DATE).exists() else []
@@ -352,7 +355,7 @@ def test_the_process_client_asks_for_manual_then_auto_english_subs(fake_ytdlp, t
     auto_args = fake_ytdlp.argv(1)
     assert "--write-auto-subs" in auto_args and "--skip-download" in auto_args
     for args in (manual_args, auto_args):
-        assert args[args.index("--sub-langs") + 1] == "en"
+        assert args[args.index("--sub-langs") + 1] == "en.*,en"
 
 
 @pytest.mark.parametrize("call", [
@@ -419,7 +422,7 @@ def test_the_cli_registers_the_youtube_adapter(make_env, fixtures_dir):
 
 def test_an_oldest_first_playlist_still_keeps_the_newest_ten_on_the_first_run(env):
     e = env()
-    e.cfg.write_text(e.cfg.read_text() + 'playlist_order = "oldest_first"\n')
+    e.cfg.write_text(e.cfg.read_text().replace("newest_first", "oldest_first"))
     ids = [f"v{i:02d}" for i in range(12)]  # position order: oldest first
     subs = {i: {"manual": MANUAL} for i in ids}
     res = e.go(FakeYtDlp(ids, subs=subs))
@@ -487,8 +490,8 @@ def test_a_video_whose_captions_were_rate_limited_is_not_rated_or_marked_process
 
 def test_a_video_that_keeps_failing_is_given_up_on_after_three_attempts(env):
     e = env()
-    soon = "ERROR: [youtube] bad: Premieres in 2 hours"  # video-specific, may work later
-    statuses = [e.go(FakeYtDlp(["good", "bad"], fail_info={"bad"}, fail_message=soon, subs={"good": {"manual": MANUAL}}))
+    odd = "ERROR: [youtube] bad: Unable to extract initial data"  # video-specific, may work later
+    statuses = [e.go(FakeYtDlp(["good", "bad"], fail_info={"bad"}, fail_message=odd, subs={"good": {"manual": MANUAL}}))
                 .sources["youtube"]["status"] for _ in range(3)]
     assert statuses == ["failed", "failed", "ok"]
     processed = json.loads((e.data / "state" / "processed.json").read_text())["youtube"]
@@ -543,10 +546,11 @@ def test_the_prompt_tells_the_model_to_use_h_mm_ss_past_one_hour():
 def test_source_level_yt_dlp_failures_never_count_toward_giving_up_a_video(env, message):
     e = env()
     for _ in range(4):
-        client = FakeYtDlp(["a", "b"], fail_all=message)
+        client = FakeYtDlp(["a", "b", "c"], fail_all=message)
         res = e.go(client)
         assert res.sources["youtube"]["status"] == "failed"
-        assert [c for c in client.calls if c[0] == "info"] == [("info", "a")]  # the run stops for the source
+        # two different videos failing this way mean yt-dlp is down: the run stops for the source
+        assert [c for c in client.calls if c[0] == "info"] == [("info", "a"), ("info", "b")]
     assert not (e.data / "state" / "youtube-attempts.json").exists()
     processed = e.data / "state" / "processed.json"
     assert not processed.exists() or json.loads(processed.read_text()).get("youtube", []) == []

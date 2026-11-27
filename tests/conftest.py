@@ -51,6 +51,7 @@ def make_env(tmp_path):
         cfg = tmp_path / "config.toml"
         body = f'[run]\nfirst_run_cap = {first_run_cap}\nalert_after_failures = 2\n\n'
         body += f'[paths]\ndata_dir = "{data_dir}"\n\n'
+        body += "[quality]\nmax_triage_calls = 0  # these tests are not about triage: no triage calls\n\n"
         for s in sources:
             body += f"[sources.{s}]\nenabled = true\n\n"
         cfg.write_text(body + extra)

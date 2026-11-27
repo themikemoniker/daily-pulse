@@ -31,6 +31,8 @@ class ItemDeferred(Exception):
 
 class SourceAdapter(ABC):
     name: str
+    quality_gate = False  # True: the runner screens new items (rules, triage) before fetch_details
+    quality_duration = False  # True: the gate's min/max duration rules apply to this source's items
 
     def status(self, ctx: AdapterContext) -> str | None:
         """None when ready to run. Otherwise a status string such as

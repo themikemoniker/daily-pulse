@@ -13,6 +13,19 @@ class ConfigError(Exception):
 
 
 @dataclass
+class QualityConfig:
+    """`[quality]`: the gate that weeds out weak and off-topic items."""
+
+    min_rating: int = 5  # the ranked list shows only items rated at least this
+    min_duration_seconds: int = 240  # skips Shorts and clips (YouTube)
+    max_duration_seconds: int = 7200
+    channel_allowlist: list[str] = field(default_factory=list)  # always kept, bypass every check
+    channel_blocklist: list[str] = field(default_factory=list)
+    title_blocklist: list[str] = field(default_factory=list)  # case-insensitive substrings
+    max_triage_calls: int = 10  # cap on triage `claude -p` calls per run (batches of up to 40)
+
+
+@dataclass
 class Config:
     data_dir: Path
     first_run_cap: int = 10
@@ -21,6 +34,7 @@ class Config:
     sources: dict[str, dict] = field(default_factory=dict)
     claude_cmd: str = "claude"
     max_claude_calls: int = 30
+    quality: QualityConfig = field(default_factory=QualityConfig)
 
 
 def _table(raw: dict, key: str) -> dict:
@@ -37,6 +51,35 @@ def _int(table: dict, key: str, default: int, minimum: int, label: str) -> int:
     if value < minimum:
         raise ConfigError(f"{label} must be >= {minimum}, got {value}")
     return value
+
+
+def _str_list(table: dict, key: str, label: str) -> list[str]:
+    value = table.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError(f"{label} must be a list of strings, got {value!r}")
+    return [v.strip() for v in value if v.strip()]
+
+
+def _quality(raw: dict) -> QualityConfig:
+    table = _table(raw, "quality")
+    defaults = QualityConfig()
+    quality = QualityConfig(
+        min_rating=_int(table, "min_rating", defaults.min_rating, 0, "quality.min_rating"),
+        min_duration_seconds=_int(table, "min_duration_seconds", defaults.min_duration_seconds, 0,
+                                  "quality.min_duration_seconds"),
+        max_duration_seconds=_int(table, "max_duration_seconds", defaults.max_duration_seconds, 0,
+                                  "quality.max_duration_seconds"),
+        channel_allowlist=_str_list(table, "channel_allowlist", "quality.channel_allowlist"),
+        channel_blocklist=_str_list(table, "channel_blocklist", "quality.channel_blocklist"),
+        title_blocklist=_str_list(table, "title_blocklist", "quality.title_blocklist"),
+        max_triage_calls=_int(table, "max_triage_calls", defaults.max_triage_calls, 0,
+                              "quality.max_triage_calls"),
+    )
+    if quality.min_rating > 10:
+        raise ConfigError(f"quality.min_rating must be <= 10, got {quality.min_rating}")
+    if quality.min_duration_seconds > quality.max_duration_seconds:
+        raise ConfigError("quality.min_duration_seconds must not exceed quality.max_duration_seconds")
+    return quality
 
 
 def load_config(path: Path) -> Config:
@@ -69,4 +112,5 @@ def load_config(path: Path) -> Config:
         sources=sources,
         claude_cmd=claude_cmd,
         max_claude_calls=_int(summarizer, "max_calls", 30, 0, "summarizer.max_calls"),
+        quality=_quality(raw),
     )

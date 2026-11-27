@@ -95,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
 def _digest(args, config, date: str) -> int:
     """Rebuild the day's digest from notes on disk plus the run result for source statuses."""
     sources: dict = {}
+    min_rating = config.quality.min_rating  # unless the day's run recorded the threshold it used
     now = None  # falls back to the end of `date`
     result_path = args.out / f"run-{date}.json"
     try:
@@ -103,6 +104,9 @@ def _digest(args, config, date: str) -> int:
         if not isinstance(sources, dict):
             raise ValueError("'sources' is not an object")
         now = parse_time(recorded.get("generated_at"))
+        threshold = recorded.get("min_rating")
+        if isinstance(threshold, int) and not isinstance(threshold, bool):
+            min_rating = threshold
     except FileNotFoundError:
         pass  # no run recorded: statuses are derived from the notes alone
     except (OSError, ValueError, AttributeError) as exc:
@@ -110,7 +114,8 @@ def _digest(args, config, date: str) -> int:
         sources = {}
     base_url = config.base_url if args.base_url is None else args.base_url
     try:
-        write_digest(args.out / "notes", args.out / "digests", date, sources=sources, base_url=base_url, now=now)
+        write_digest(args.out / "notes", args.out / "digests", date, sources=sources, base_url=base_url, now=now,
+                     min_rating=min_rating)
     except Exception as exc:  # noqa: BLE001 - whatever went wrong, say so cleanly rather than a traceback
         print(f"daily-pulse: cannot write digest under {args.out / 'digests'}: {exc}", file=sys.stderr)
         return 1

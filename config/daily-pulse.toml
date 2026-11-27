@@ -14,10 +14,20 @@ base_url = "https://themikemoniker.github.io/daily-pulse/"  # digest links are b
 claude_cmd = "claude"       # the CLI used for `claude -p`; $DAILY_PULSE_CLAUDE overrides it
 max_calls = 30              # cap on `claude -p` calls per run, retries included
 
+[quality]
+min_rating = 5              # the ranked list shows only items rated at least this (and not "skip")
+min_duration_seconds = 240  # YouTube: skips Shorts and clips
+max_duration_seconds = 7200 # YouTube: skips very long streams
+channel_allowlist = []      # always kept: they bypass every check and the triage call
+channel_blocklist = []      # channel names (case-insensitive) dropped before any claude call
+title_blocklist = []        # case-insensitive substrings of a title that drop the item
+max_triage_calls = 10       # cap on triage `claude -p` calls per run (one call covers up to 40 items)
+
 [sources.youtube]
 enabled = true
-playlist_url = ""           # unset until supplied; the module reports "not configured"
-playlist_order = "newest_first"  # or "oldest_first" if new videos are appended at the bottom
+playlist_url = "https://www.youtube.com/playlist?list=PLOsrHd23kLUo"  # the "brain" playlist
+playlist_order = "oldest_first"  # this playlist appends new videos at the bottom; "newest_first" otherwise.
+                                 # Leave it out to detect the order from the first and last upload dates.
 ytdlp_cmd = "yt-dlp"        # path to yt-dlp; scripts/install-ytdlp.sh puts it at <repo>/.venv/bin/yt-dlp
 
 [sources.instagram]
