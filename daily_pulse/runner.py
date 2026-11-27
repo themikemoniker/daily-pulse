@@ -106,7 +106,10 @@ def run_pipeline(
     state = StateStore(config.data_dir, persist=not dry_run)
     failures = FailureCounters(config.data_dir, persist=not dry_run)
     for name, source_cfg in config.sources.items():
-        ctx = AdapterContext(config=source_cfg, fixtures_dir=fixtures_dir, date=date)
+        ctx = AdapterContext(
+            config=source_cfg, fixtures_dir=fixtures_dir, date=date,
+            data_dir=config.data_dir, persist=not dry_run,
+        )
         try:
             _run_source(name, source_cfg, config, ctx, state, failures, result)
         except StateError as exc:
