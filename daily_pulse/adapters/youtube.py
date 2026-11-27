@@ -240,7 +240,7 @@ class YouTubeAdapter(SourceAdapter):
 
     @staticmethod
     def _state_file(ctx: AdapterContext, name: str) -> Path | None:
-        return None if ctx.data_dir is None or ctx.dry_run else Path(ctx.data_dir) / "state" / name
+        return None if ctx.data_dir is None or not ctx.persist else Path(ctx.data_dir) / "state" / name
 
     @staticmethod
     def _load_map(path: Path | None) -> dict:
@@ -318,7 +318,7 @@ class YouTubeAdapter(SourceAdapter):
         item.published = _iso_date(info.get("upload_date"))
         item.metrics = {"duration": _count(info.get("duration")), "views": _count(info.get("view_count"))}
         item.text = str(info.get("description") or "").strip()[:DESCRIPTION_EXCERPT]
-        if ctx.dry_run:
+        if not ctx.persist:
             return item
         if ctx.summarizer is None or ctx.notes_dir is None:  # never consume a video without a note
             raise SummaryFailed(f"{item.id}: no summarizer or notes directory in the run context")

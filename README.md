@@ -48,8 +48,26 @@ identical files.
 - Captions are cleaned (markup, entities and rolling auto-caption repeats removed; `[mm:ss]` timestamps kept) and saved only to `<data_dir>/transcripts/youtube-<id>.txt`. The cleaned text goes to the summarizer, and the note (`<out>/notes/<date>/youtube-<id>.md`) holds an own-words summary, takeaways, a timestamped argument and short quotes, all passing the quote guard.
 - No captions: the video is rated from its metadata and description excerpt, and the note is flagged with a `metadata-only` tag and a "Metadata only (no captions)" reason prefix, and it carries no timestamped beats (there is no transcript to ground them).
 - A video whose yt-dlp call, caption download or rating fails is logged and skipped. It is not marked processed, so the next run retries it; the other videos are unaffected. A rate-limited or otherwise failed caption download counts as a failure (it is never taken for "no captions"). Rate limits, timeouts, network errors, the bot check and a broken yt-dlp are never held against a video: the run stops for the source (reported `failed`) and every video is tried again next run. Videos that can never work (private, members-only, age-restricted, region-blocked, unavailable) are skipped at once, and a video that is not out yet (premiere, scheduled live) is given up on after 3 failures (counted in `<data_dir>/state/youtube-attempts.json`): it is marked processed, logged, and no longer fails the source. Failed ratings are not counted, so a `claude` outage never makes videos get dropped.
-- A video with no captions that was uploaded within the last 2 days, or is live or upcoming, is not rated yet: it stays unprocessed (not a failure) and is looked at again next run, for up to 3 days from the first run that saw it (`<data_dir>/state/youtube-pending.json`). After that it gets the metadata-only note.
-Processed IDs make a rerun find nothing new.
+- A video with no captions that was uploaded within the last 2 days, or is live or upcoming, is not rated yet: it stays unprocessed (not a failure) and is looked at again next run, for up to 3 days from the first run that saw it (`<data_dir>/state/youtube-pending.json`). After that it gets the metadata-only note. Processed IDs make a rerun find nothing new.
+
+## GitHub source
+
+`daily_pulse/adapters/github.py` uses the GitHub REST API (stdlib `urllib`), unauthenticated unless the `GITHUB_TOKEN` environment variable is set (read per request, sent only as a bearer header, never logged or stored).
+
+- **Rising**: repos created in the last `rising_days` (default 7), top 10 by stars. Metrics carry `stars`, `age_days` and `star_velocity` (stars / age in days, age floored at one day). Id `rising:<owner/repo>`.
+- **Watched accounts** (`watch_accounts`): new repos (`repo:`), releases in the last `lookback_days` (`release:<repo>:<tag>`), the newest tag when a recently pushed repo has no release (`tag:`), a push on the run day when nothing else explains it (`push:<repo>:<date>`), and a star gain of at least `star_delta` (default 50) since the previous run (`stars:<repo>:<date>`). The star baseline lives in `data/state/github.json`; it is not written on `--dry-run`. Forks are ignored.
+- **Watched repos** (`watch_repos`, e.g. `can1357/oh-my-pi`): releases only, checked first so a tight rate limit cannot starve them. Top-contributor tracking is not implemented.
+- **Rate limits**: `X-RateLimit-Remaining` is read on every response. A 403/429 rate-limit response waits out a short `Retry-After`/reset (at most 30 s) once; otherwise, or when the budget hits zero, the adapter logs a warning, stops calling the API and returns what it already has (`adapter.last_run["degraded"]`). It never raises for a rate limit.
+- Tests use recorded responses in `tests/fixtures/github/responses.json` (keyed by API path) via `--fixtures`, or an injected transport. Unauthenticated limits are 60 requests/hour, so a long watch list may degrade without a token.
+
+## Static site
+
+`daily-pulse site --out <dir> [--date YYYY-MM-DD] [--site DIR]` builds `<dir>/site/` (default) in plain
+HTML and one shared `style.css` (light/dark via `prefers-color-scheme`, no JavaScript, no external assets):
+`index.html` (the day's ranked digest with a diamond callout), `archive/index.html`, `days/<date>.html`
+and `notes/<date>/<note>.html`. It copies `notes/*.md` and `digests/<date>.{md,html}` into the tree and
+reads nothing else, so `data/` can never reach the site. Pages are built from the site's own `notes/`, so
+earlier days stay in the archive; a rebuild is byte-identical.
 
 ## Deferred sources
 

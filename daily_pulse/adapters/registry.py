@@ -17,9 +17,10 @@ def get(name: str) -> SourceAdapter | None:
 
 def register_builtin() -> None:
     """Register the shipped adapters that aren't registered yet (safe to call repeatedly)."""
+    from daily_pulse.adapters.github import GitHubAdapter
     from daily_pulse.adapters.instagram import InstagramAdapter
     from daily_pulse.adapters.x import XAdapter
     from daily_pulse.adapters.youtube import YouTubeAdapter
 
-    for adapter in (XAdapter(), InstagramAdapter(), YouTubeAdapter()):
+    for adapter in (GitHubAdapter(), XAdapter(), InstagramAdapter(), YouTubeAdapter()):
         _ADAPTERS.setdefault(adapter.name, adapter)

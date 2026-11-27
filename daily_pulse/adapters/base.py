@@ -13,10 +13,10 @@ class AdapterContext:
     config: dict = field(default_factory=dict)  # this source's [sources.<name>] table
     fixtures_dir: Path | None = None  # set by --fixtures; adapters read recorded inputs from it
     date: str = ""  # run date, YYYY-MM-DD
-    data_dir: Path | None = None  # local-only data (transcripts); never published
+    data_dir: Path | None = None  # local-only state dir; adapters keep private state under it
+    persist: bool = True  # False on --dry-run: adapters must not write anything
     notes_dir: Path | None = None  # where per-item notes are written (<out>/notes); None: write none
     summarizer: object | None = None  # a daily_pulse.summarizer.Summarizer shared by the whole run
-    dry_run: bool = False  # write nothing to disk and make no `claude` calls
 
 
 class ItemSkipped(Exception):

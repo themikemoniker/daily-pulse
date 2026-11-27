@@ -120,9 +120,11 @@ def run_pipeline(
     summarizer = Summarizer.from_config(config)  # one per run, so its call cap spans all sources
     notes_dir = None if out_dir is None else Path(out_dir) / "notes"
     for name, source_cfg in config.sources.items():
-        ctx = AdapterContext(config=source_cfg, fixtures_dir=fixtures_dir, date=date,
-                             data_dir=config.data_dir, notes_dir=notes_dir,
-                             summarizer=summarizer, dry_run=dry_run)
+        ctx = AdapterContext(
+            config=source_cfg, fixtures_dir=fixtures_dir, date=date,
+            data_dir=config.data_dir, persist=not dry_run,
+            notes_dir=notes_dir, summarizer=summarizer,
+        )
         try:
             _run_source(name, source_cfg, config, ctx, state, failures, result)
         except StateError as exc:
