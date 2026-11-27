@@ -55,6 +55,7 @@ handles = [
 [sources.github]
 enabled = true
 rising_days = 7
+use_gh_login = true        # no GITHUB_TOKEN set: ask `gh auth token` once and keep it in memory (5000 requests an hour instead of 60)
 watch_accounts = [
   "karpathy", "mattpocock", "can1357", "simonw", "hamelsmu", "shreyashankar",
   "jxnl", "eugeneyan", "hwchase17", "anthropics", "langchain-ai",

@@ -6,7 +6,9 @@ accounts = []
 repos = []
 
 [youtube]
-channels = []
+channels = [
+  "https://www.youtube.com/@mattpocockuk",
+]
 
 [x]
 usernames = []

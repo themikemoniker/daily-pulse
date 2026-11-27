@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import fnmatch
+import glob
 import json
 import logging
 import os
+import re
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -36,21 +40,68 @@ MAX_WAIT_SECONDS = 30  # longest Retry-After / reset wait we will sit through
 MIN_REMAINING = 1  # stop issuing requests when this few remain
 
 
+def _gh_executable() -> str | None:
+    """gh on PATH, else the newest ~/.local/opt/gh-*/bin/gh (cron has a short PATH)."""
+    found = shutil.which("gh")
+    if found:
+        return found
+    def version(path: str):
+        return [int(n) for n in re.findall(r"\d+", path.split("/gh-")[-1].split("/")[0])]
+    candidates = sorted(glob.glob(os.path.expanduser("~/.local/opt/gh-*/bin/gh")), key=version)
+    return candidates[-1] if candidates else None
+
+
 class UrllibTransport:
-    """Real HTTP. The optional token is read from the environment on each call and only ever
-    placed in the Authorization header: it is not stored, logged or shown in repr."""
+    """Real HTTP. The optional token comes from the `GITHUB_TOKEN` environment variable, read per
+    call, or, with `gh_login`, from the operator's `gh auth token` (asked once, held in memory only:
+    it is never put in the environment, so no child process inherits it). It is only ever placed in
+    the Authorization header: not logged, not shown in repr. A token GitHub rejects (401) is dropped
+    for the rest of the run and the request is retried without it."""
 
     TOKEN_ENV = "GITHUB_TOKEN"
     TIMEOUT = 30
+    GH_TIMEOUT = 20
+
+    def __init__(self, gh_login: bool = False, gh_cmd: str | None = None):
+        self._gh_login, self._gh_cmd = gh_login, gh_cmd
+        self._borrowed: str | None = None  # None: not asked yet; "": asked, none available
+        self._rejected = False
 
     def __repr__(self) -> str:
         return "UrllibTransport()"
+
+    def _token(self) -> str:
+        if self._rejected:
+            return ""
+        env = os.environ.get(self.TOKEN_ENV, "").strip()
+        if env or not self._gh_login:
+            return env
+        if self._borrowed is None:
+            self._borrowed = self._from_gh()
+        return self._borrowed
+
+    def _from_gh(self) -> str:
+        gh = self._gh_cmd or _gh_executable()
+        if not gh:
+            log.info("github: no gh found to borrow a login from, running unauthenticated (60 requests an hour)")
+            return ""
+        try:
+            done = subprocess.run([gh, "auth", "token"], capture_output=True, text=True, timeout=self.GH_TIMEOUT,
+                                  stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            done = None
+        token = (done.stdout.strip() if done is not None and done.returncode == 0 else "")
+        if token:
+            log.info("github: using the gh login for API requests")
+        else:
+            log.info("github: gh has no usable login, running unauthenticated (60 requests an hour)")
+        return token
 
     def __call__(self, path: str, params: dict):
         url = f"{API}{path}" + (f"?{urllib.parse.urlencode(params)}" if params else "")
         headers = {"Accept": "application/vnd.github+json", "User-Agent": "daily-pulse",
                    "X-GitHub-Api-Version": "2022-11-28"}
-        token = os.environ.get(self.TOKEN_ENV, "").strip()
+        token = self._token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
         req = urllib.request.Request(url, headers=headers)
@@ -59,6 +110,10 @@ class UrllibTransport:
                 status, resp_headers, raw = resp.status, dict(resp.headers), resp.read()
         except urllib.error.HTTPError as err:
             status, resp_headers, raw = err.code, dict(err.headers or {}), err.read()
+        if status == 401 and token:
+            self._rejected = True
+            log.warning("github: the token was rejected (401), continuing without it for this run")
+            return self(path, params)
         try:
             body = json.loads(raw or b"null")
         except ValueError:
@@ -92,6 +147,7 @@ class GitHubAdapter(SourceAdapter):
 
     def __init__(self, transport=None, sleep=time.sleep, clock=time.time):
         self._transport = transport  # callable(path, params) -> (status, headers, body)
+        self._urllib: UrllibTransport | None = None
         self._sleep = sleep
         self._clock = clock
         self._exhausted: dict = {}
@@ -104,11 +160,20 @@ class GitHubAdapter(SourceAdapter):
         day = _date.fromisoformat(ctx.date) if ctx.date else datetime.now(timezone.utc).date()
         return datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
 
+    def _live(self, ctx: AdapterContext) -> UrllibTransport:
+        """One real transport per adapter, so a borrowed login is asked for once, not per request."""
+        if self._urllib is None:
+            use = ctx.config.get("use_gh_login", False)
+            if not isinstance(use, bool):
+                raise ValueError(f"sources.github.use_gh_login must be true or false, got {use!r}")
+            self._urllib = UrllibTransport(gh_login=use)
+        return self._urllib
+
     def _get(self, ctx: AdapterContext, path: str, params: dict | None = None):
         """One API call. Raises RateLimited when the budget is spent; waits out a short
         Retry-After (once) first."""
         transport = self._transport or (
-            FixtureTransport(ctx.fixtures_dir) if ctx.fixtures_dir else UrllibTransport())
+            FixtureTransport(ctx.fixtures_dir) if ctx.fixtures_dir else self._live(ctx))
         path_bucket = "search" if path.startswith("/search") else "core"
         for attempt in (1, 2):
             if path_bucket in self._exhausted:
