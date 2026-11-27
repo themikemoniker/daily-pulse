@@ -248,3 +248,47 @@ def test_an_already_running_lock_held_for_hours_is_notified(env):
     finally:
         holder.kill()
         holder.wait()
+
+
+def _token_probe(tmp_path, gh_body, monkeypatch, preset=None):
+    """Run the wrapper with a daily-pulse stub that records whether GITHUB_TOKEN reached `run`."""
+    probe = tmp_path / "probe"
+    probe.write_text(f'#!{sys.executable}\nimport os, sys\n'
+                     'if sys.argv[1] == "run":\n'
+                     '    open(os.environ["PROBE_OUT"], "w").write(os.environ.get("GITHUB_TOKEN", "<unset>"))\n'
+                     'sys.exit(0)\n')
+    probe.chmod(0o755)
+    gh = tmp_path / "gh"
+    gh.write_text(gh_body)
+    gh.chmod(0o755)
+    notify = tmp_path / "notify"
+    notify.write_text("#!/bin/sh\nexit 0\n")
+    notify.chmod(0o755)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'[paths]\ndata_dir = "{tmp_path / "data"}"\n')
+    env = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
+    env.update(DAILY_PULSE_BIN=str(probe), DAILY_PULSE_GH=str(gh), DAILY_PULSE_NOTIFY=str(notify),
+               DAILY_PULSE_CONFIG=str(cfg), DAILY_PULSE_DATA_DIR=str(tmp_path / "data"),
+               DAILY_PULSE_SITE=str(tmp_path / "site"), DAILY_PULSE_DATE=DATE,
+               PROBE_OUT=str(tmp_path / "seen"), HOME=str(tmp_path))
+    if preset:
+        env["GITHUB_TOKEN"] = preset
+    subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, timeout=60)
+    return (tmp_path / "seen").read_text() if (tmp_path / "seen").exists() else None
+
+
+def test_the_wrapper_borrows_the_gh_login_for_github_token(tmp_path, monkeypatch):
+    assert _token_probe(tmp_path, '#!/bin/sh\n[ "$1 $2" = "auth token" ] && echo gho_fake_token\n', monkeypatch) \
+        == "gho_fake_token"
+
+
+def test_an_existing_github_token_is_never_replaced(tmp_path, monkeypatch):
+    assert _token_probe(tmp_path, "#!/bin/sh\necho gho_other\n", monkeypatch, preset="mine") == "mine"
+
+
+def test_a_failing_gh_leaves_the_run_unauthenticated(tmp_path, monkeypatch):
+    assert _token_probe(tmp_path, "#!/bin/sh\nexit 1\n", monkeypatch) == "<unset>"
+
+
+def test_a_gh_that_prints_nothing_leaves_the_run_unauthenticated(tmp_path, monkeypatch):
+    assert _token_probe(tmp_path, "#!/bin/sh\n", monkeypatch) == "<unset>"

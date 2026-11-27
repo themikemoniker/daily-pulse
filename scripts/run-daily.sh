@@ -15,6 +15,8 @@
 #   DAILY_PULSE_NOTIFY   the notifier command         (default: ~/bin/notify)
 #   DAILY_PULSE_STALE_HOURS  notify when "already running" persists this long (default: 3)
 #   DAILY_PULSE_DATE     the run date, YYYY-MM-DD     (default: today)
+#   DAILY_PULSE_GH       the gh executable whose login supplies GITHUB_TOKEN when none is set
+#                        (default: gh on PATH, else ~/.local/opt/gh-*/bin/gh)
 set -u
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -24,6 +26,21 @@ export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}"
 export LC_ALL="${LC_ALL:-C.UTF-8}"
 exec </dev/null
 cd "$ROOT" || exit 1
+
+# The GitHub API allows 60 unauthenticated requests an hour, which a watchlist of a dozen accounts uses up.
+# With no GITHUB_TOKEN set, borrow the operator's gh login: the token lives in this process's environment
+# only (never in a file, a log or the command line). No gh, no login or a slow gh: carry on unauthenticated.
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+    GH=${DAILY_PULSE_GH:-$(command -v gh 2>/dev/null || true)}
+    if [ -z "$GH" ]; then
+        for candidate in "$HOME"/.local/opt/gh-*/bin/gh; do [ -x "$candidate" ] && GH=$candidate; done
+    fi
+    if [ -n "$GH" ] && [ -x "$GH" ]; then
+        token=$(timeout 20 "$GH" auth token 2>/dev/null </dev/null || true)
+        [ -n "$token" ] && export GITHUB_TOKEN=$token
+        unset token
+    fi
+fi
 
 BIN=${DAILY_PULSE_BIN:-$ROOT/.venv/bin/daily-pulse}
 CONFIG=${DAILY_PULSE_CONFIG:-$ROOT/config/daily-pulse.toml}
