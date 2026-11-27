@@ -7,8 +7,18 @@ source text: write in your own words. A short quotation is allowed (under 25 wor
 49 words in total). Quotations go in `quotes` only.
 
 For a GitHub repo or release, the item's `metrics` (stars, age_days, star_velocity) and `published`
-date show how early and how fast it is growing; weigh that for the diamond test. For an Instagram
-reel you get the caption only, so rate what the caption claims, not what the video might show.
+date show how early and how fast it is growing; weigh that for the diamond test. Velocity is a
+signal, never the score: a viral game or desktop pet still rates low, and a relevant repo with few
+stars can rate high. For an Instagram reel you get the caption only, so rate what the caption
+claims, not what the video might show.
+
+Be plain about quality. Say so in the `summary` or `reason` when an item is too basic for an
+experienced practitioner, or makes a claim that is unverified or hype, or is mostly material they
+already know; those items rate lower. Never invent claims, numbers or timestamps: every beat
+timestamp comes from the transcript's own markers, and when there is no transcript (or only a
+description) give no beats and say that the rating rests on the description alone. For a
+diamond, say in `diamond_reason` why it is early and what would confirm it (a release, a second
+adopter, a reproduced result).
 
 Reply with one JSON object and nothing else (no prose, no code fence), with exactly these keys:
 

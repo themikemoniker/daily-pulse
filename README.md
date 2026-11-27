@@ -6,8 +6,8 @@ digest (markdown and email-ready HTML) and a static site, and publishes the site
 Live site: https://themikemoniker.github.io/daily-pulse/. Python 3.11+, standard library only at runtime.
 
 Source status in v1: **YouTube** is collected, rated and noted end to end. **GitHub** and **Instagram** items are
-collected and appear in the run result (`run-<date>.json`), but the runner does not rate or write notes for them
-yet, so they do not reach the digest or the site. **X** is deferred (see [Deferred sources](#deferred-sources)).
+collected, rated by the runner and noted, so they reach the digest and the site like YouTube items (Instagram only
+once a command is configured). **X** is opt-in and paid, and off until the owner enables it (see [X (opt-in, paid API)](#x-opt-in-paid-api)).
 
 ## Setup
 
@@ -17,12 +17,12 @@ yet, so they do not reach the digest or the site. **X** is deferred (see [Deferr
 1. **Install yt-dlp** with `scripts/install-ytdlp.sh`, then set `ytdlp_cmd = "/path/to/repo/.venv/bin/yt-dlp"` under
    `[sources.youtube]` (cron has a short PATH) or export `DAILY_PULSE_YTDLP`, which wins over the config.
 2. **Configure sources and accounts** in `config/daily-pulse.toml`: `[sources.youtube] playlist_url`;
-   `[sources.github] watch_accounts` / `watch_repos` / `rising_days`; `[sources.x] handles` (stored for later);
+   `[sources.github] watch_accounts` / `watch_repos` / `rising_days`; `[sources.x]` (opt-in, see [X](#x-opt-in-paid-api); `handles` are display names kept for reference);
    `[sources.instagram] kinds`. Each source has `enabled`. Adding an account is a one-line edit. Other tables:
    `[run]` (`first_run_cap`, `alert_after_failures`), `[paths] data_dir`, `[site] base_url`, `[summarizer]`
    (`claude_cmd`, `max_calls`) and `[quality]` (see [Quality gate](#quality-gate)).
 3. **Environment** (never in the config or the repo): `GITHUB_TOKEN` (optional, higher GitHub rate limits),
-   `IG_CLI_CMD` (the Instagram command), `DAILY_PULSE_CLAUDE` (overrides `claude_cmd`), `DAILY_PULSE_YTDLP`.
+   `IG_CLI_CMD` (the Instagram command), `X_BEARER_TOKEN` (X API bearer token; only used once X is opted in), `DAILY_PULSE_CLAUDE` (overrides `claude_cmd`), `DAILY_PULSE_YTDLP`.
 4. `claude` must be on the PATH of whatever runs the pipeline; it uses your Claude subscription, no API key.
 
 ## Privacy rules
@@ -44,9 +44,7 @@ output, and that one failing source does not hide the others. Tests never call t
 
 ## Backlog (v2, not built)
 
-Frame grabs with ffmpeg at key beats; thought-leader and account discovery; thumbs up/down curation; an X read
-route; a real Instagram CLI satisfying `docs/instagram-adapter.md`; Whisper transcription for reels; rating and
-noting GitHub and Instagram items in the runner. Tracked in the "v2 backlog" issue.
+Frame grabs with ffmpeg at key beats; thought-leader and account discovery; thumbs up/down curation; a real Instagram CLI satisfying `docs/instagram-adapter.md`; Whisper transcription for reels. Tracked in the "v2 backlog" issue.
 
 ## Running
 
@@ -84,7 +82,7 @@ Every item from every enabled source ends a run in exactly one of three states: 
 
 - Who rates: YouTube rates inside its adapter (it needs captions). GitHub and Instagram set `rated_by_runner = True` on the adapter, and the runner does it once for both: after `fetch_details` it sends the item through the run's one `Summarizer` and writes the note with `write_note`. A new source gets the same behavior by setting that flag; an adapter may override `rating_text(item, ctx)` to give the rater extra text that is never stored.
 - **GitHub** items (rising and new repos, releases, tags, pushes, star gains) are rated from their own metadata: repo description and topics, stars, `age_days` and `star_velocity`, the release name and a body excerpt. Early, fast-growing repos can therefore be diamonds; a repo rated 9+ and under 48 hours old appears in "Diamonds in the rough".
-- **Instagram** reels are rated from the full caption (kept in memory by the adapter, never written anywhere) plus metadata, saved before liked. With no `IG_CLI_CMD` the source stays deferred and nothing changes. The quality gate's rules and triage apply as before. **X** stays deferred.
+- **Instagram** reels are rated from the full caption (kept in memory by the adapter, never written anywhere) plus metadata, saved before liked. With no `IG_CLI_CMD` the source stays deferred and nothing changes. The quality gate's rules and triage apply as before. **X** posts are rated the same way from the full post text (kept in memory only) once X is opted in; otherwise X stays deferred.
 - The notes are own-words summaries; the quote guard checks them against the caption or the item's excerpt, so a README or caption is never pasted into a note.
 - A rating that fails (a `claude` outage, a malformed reply twice, a note the writer refuses) leaves the item unprocessed and counts as a failure for its source, like a YouTube video; the next run tries again. Items rated past the `[summarizer] max_calls` cap (shared by all sources, retries included) are not a fault: they wait for the next run without counting against the source.
 - `--dry-run` rates nothing and writes nothing.
@@ -148,9 +146,10 @@ Weak and off-topic items are weeded out cheaply, before a full `claude -p` summa
 
 `daily_pulse/adapters/github.py` uses the GitHub REST API (stdlib `urllib`), unauthenticated unless the `GITHUB_TOKEN` environment variable is set (read per request, sent only as a bearer header, never logged or stored).
 
-- **Rising**: repos created in the last `rising_days` (default 7), top 10 by stars. Metrics carry `stars`, `age_days` and `star_velocity` (stars / age in days, age floored at one day). Id `rising:<owner/repo>`.
+- **Rising**: repos created in the last `rising_days` (default 7), searched per topic and rated for relevance (see "Rising repos and relevance" below). Metrics carry `stars`, `age_days` (a repo younger than a day counts as one day, so the proxy is never inflated) and `star_velocity` (stars per age day).
 - **Watched accounts** (`watch_accounts`): new repos (`repo:`), releases in the last `lookback_days` (`release:<repo>:<tag>`), the newest tag when a recently pushed repo has no release (`tag:`), a push on the run day when nothing else explains it (`push:<repo>:<date>`), and a star gain of at least `star_delta` (default 50) since the previous run (`stars:<repo>:<date>`). The star baseline lives in `data/state/github.json`; it is not written on `--dry-run`. Forks are ignored.
 - **Watched repos** (`watch_repos`, e.g. `can1357/oh-my-pi`): releases only, checked first so a tight rate limit cannot starve them. Top-contributor tracking is not implemented.
+- **Rising repos and relevance**: `rising_topics` (the shipped config lists agent, llm, mcp, claude-code and ai-agent; with the key omitted there is one unfiltered search) runs one search per topic, since GitHub ANDs several `topic:` qualifiers. The candidates (at least `min_stars` stars, forks and ignored repos left out) form a rating pool: the 20 fastest growers plus the 5 best topic matches. The runner then rates the NEW ones in one `claude -p` call (`prompts/rate-repos.md`, the working digest script's relevance prompt; stars and stars/day are shown to the rater only as signals). Repos are taken most relevant first, then topic match, then velocity, at most `rising_top` per run; one rated below `min_relevance` (default 4) is dropped, logged and listed under the source's `dropped`, with no note. With no summarizer, a failed call or a spent call cap the repos stay unrated (never a guessed score) and carry on to the per-item rating. `readme_excerpt = true` also sends each new rising repo's first 400 README characters to the rater (needs `GITHUB_TOKEN`; never stored). A GitHub item is a diamond in the digest at rating 7 or more with 50 or more stars a day (note field `star_velocity`), in addition to the rating 9 and under 48 hours rule.
 - **Order and noise**: candidates are processed by kind, newest first within a kind: releases, new repos, rising repos, tags, star jumps, and last bare pushes. That order decides what the first-run cap (`first_run_cap`) keeps and what the per-run `claude -p` call budget is spent on, so a day of pushes can never crowd out a release or a rising repo. A bare push (no release or tag) is emitted only for a repo with at least `push_min_stars` stars (default 25), and repos matching `ignore_repos` (`owner/name` globs, case-insensitive; the shipped config lists Simon Willison's daily-pushing scraper repos) produce no items at all. Both settings are validated; a malformed value fails the source with a message naming it.
 - **Rate limits**: `X-RateLimit-Remaining` is read on every response. A 403/429 rate-limit response waits out a short `Retry-After`/reset (at most 30 s) once; otherwise, or when the budget hits zero, the adapter logs a warning, stops calling the API and returns what it already has (`adapter.last_run["degraded"]`). It never raises for a rate limit.
 - Tests use recorded responses in `tests/fixtures/github/responses.json` (keyed by API path) via `--fixtures`, or an injected transport. Unauthenticated limits are 60 requests/hour, so a long watch list may degrade without a token.
@@ -166,9 +165,36 @@ earlier days stay in the archive; a rebuild is byte-identical.
 
 ## Deferred sources
 
-- **X: deferred** (`deferred: no usable read route`). Blockers: no X connector exists on the host, the X API free tier cannot read other accounts' posts, and raw scraping is forbidden. To unblock: provide a connector or a paid API tier that can read the accounts, then implement `list_new`/`fetch_details` in `daily_pulse/adapters/x.py`. The seed handles stay in `[sources.x].handles`.
+- **X: deferred until opted in** (`deferred: ...` naming what is missing). See [X (opt-in, paid API)](#x-opt-in-paid-api).
 - **Instagram: deferred until a CLI is configured** (`deferred: no CLI configured`). Blocker: no sanctioned read access to saved/liked reels. To unblock: set `IG_CLI_CMD` to a command that prints the JSON described in `docs/instagram-adapter.md` (saved reels first, then liked). Items carry metadata and a short caption excerpt only; they are rated through the summarizer.
-- Both modules appear in the run result with their status and never fail the run.
+- Deferred modules appear in the run result with their status and never fail the run.
+
+## X (opt-in, paid API)
+
+The X adapter (`daily_pulse/adapters/x.py`) uses the official X API v2, which is **paid** (no free read tier). It is
+**off until the owner turns it on**: it makes no request, in any run, unless **both** hold:
+
+1. `[sources.x] paid_api_approved = true` in the config (shipped `false`), and
+2. the environment variable named by `token_env` (default `X_BEARER_TOKEN`) is non-empty.
+
+Otherwise the source's status is `deferred: ...` saying what is missing (the variable's name, never a value) and the
+run carries on. Nothing runs until the owner sets the flag and the token.
+
+- **Accounts**: `usernames = []` (@-less usernames: letters, digits, underscore, 1 to 15 characters; shipped empty). The
+  seed `handles` are display names, not usernames, and are not used.
+- **Cost controls**: `max_accounts` (10), `max_posts_per_account` (10), `lookback_days` (1), `exclude=replies`, and a
+  username-to-id cache at `<data_dir>/state/x-user-ids.json` (written only on a real run, never on `--dry-run`), so a
+  user lookup is paid once. HTTP 402, 429 or 401 stops the X module with a clear error (only X fails) and
+  makes no further request that run.
+- **Estimated cost** (from the reference script's notes, not verified billing): $0.005 per post read and $0.010 per
+  user lookup, so about 100 post reads plus 10 lookups a day, roughly $0.60/day, with the defaults and ten accounts.
+  Each run logs its own estimate (`x: ... estimated cost $...`).
+- **Items**: id (the post's own id, so reruns are idempotent), url, author, published, metrics (`likes`, `reposts`,
+  `replies`, `kind`) and a short excerpt (at most 200 characters). A repost is labelled `repost` and shows the original's
+  text and metrics, resolved from `includes.tweets`. The full post text lives in memory only, is handed to the rater via
+  `rating_text` (like Instagram captions), and is never written to notes, state, logs or the site.
+- **Tests and `--fixtures`** read recorded responses from `<fixtures>/x/responses.json` (keyed by API path, in the real
+  API shape) and never touch the network. `paid_api_approved` still has to be true for the fixture run to produce items.
 
 ## Publishing and the daily cron job
 

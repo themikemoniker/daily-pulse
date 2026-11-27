@@ -10,7 +10,7 @@ popularity. An item scores high only if it is useful for these topics:
 - model routing and cost
 - guard rails for accounting-firm AI consulting
 
-Scale: 1-10. 1-3 is off-topic or noise, 4-6 touches the topics in passing, 7-8 is a clear and
+Scale: 1-10. 1-3 is off-topic or noise, 4-6 touches the topics in passing or is decent but mostly known already, 7-8 is a clear and
 useful treatment of one or more of them, 9-10 is something a consultant would act on this week.
 
 Verdicts: `watch` (worth the full time), `skim` (read the summary, maybe jump to a section),

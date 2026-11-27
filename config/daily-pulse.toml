@@ -39,8 +39,14 @@ kinds = ["saved", "liked"]  # saved reels first, liked second
 cli_cmd_env = "IG_CLI_CMD"  # env var holding the command that prints JSON
 
 [sources.x]
-enabled = true              # module is deferred in v1; handles are stored for later
-handles = [
+enabled = true              # opt-in and PAID: nothing runs until paid_api_approved is true AND the token env var is set
+paid_api_approved = false   # the owner's explicit OK to spend on the X API (est. $0.005 per post read, $0.010 per user lookup)
+token_env = "X_BEARER_TOKEN"  # env var holding the API bearer token (never put the token in this file)
+usernames = []              # @-less X usernames to read, e.g. ["jack"]; empty ships by default. Used instead of handles
+max_accounts = 10           # most accounts read per run
+max_posts_per_account = 10  # most posts kept per account per run
+lookback_days = 1           # only posts newer than this many days
+handles = [                 # display names, kept for reference only: the adapter reads usernames, not handles
   "Andrej Karpathy",
   "Matt Pocock",
   "Nate Herk",
@@ -55,6 +61,12 @@ handles = [
 [sources.github]
 enabled = true
 rising_days = 7
+rising_topics = ["agent", "llm", "mcp", "claude-code", "ai-agent"]  # one search per topic; [] = one search for everything
+rising_per_page = 30        # results per topic search (the rating pool is the 20 fastest growers + 5 best topic matches)
+min_stars = 5               # a rising repo needs at least this many stars to be considered
+rising_top = 10             # at most this many new rising repos are rated and noted per run
+min_relevance = 4           # a rising repo the batch rating scores below this is dropped (logged), not noted
+readme_excerpt = false      # true: send each new rising repo's first 400 README characters to the rater (needs GITHUB_TOKEN; never stored)
 watch_accounts = [
   "karpathy", "mattpocock", "can1357", "simonw", "hamelsmu", "shreyashankar",
   "jxnl", "eugeneyan", "hwchase17", "anthropics", "langchain-ai",

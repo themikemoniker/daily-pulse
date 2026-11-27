@@ -111,6 +111,12 @@ def _generic(item: Item, rating: Rating, gl, head: dict) -> tuple[list, list]:
         ("verdict", rating.verdict),
         ("tags", head["tags"]),
     ]
+    velocity = (item.metrics or {}).get("star_velocity")
+    if (item.source == "github" and item.id.startswith(("rising:", "repo:"))
+            and isinstance(velocity, (int, float)) and not isinstance(velocity, bool)):
+        # New repos only (a lifetime average says nothing about a release of a mature repo): the
+        # digest's GitHub diamond rule reads it.
+        front.append(("star_velocity", velocity))
     return front, ["## Summary", "", gl([_one_line(rating.summary)])[0]]
 
 

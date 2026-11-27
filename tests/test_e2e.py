@@ -134,12 +134,12 @@ def test_every_source_is_run_and_youtube_reaches_notes_digest_and_site(pipeline)
     digest = (pipeline.out / "digests" / f"{DATE}.md").read_text()
     assert VIDEOS["vid1"] in digest
     assert "newrepo/agent-evals" in digest
-    assert "Reel by saver (S1)" in digest
+    assert "saved reel one" in digest
     assert "deferred" in digest.lower()  # the digest says X is deferred
     assert (pipeline.out / "digests" / f"{DATE}.html").read_text().startswith(("<!", "<html", "<table", "<div"))
     index = (pipeline.site / "index.html").read_text()
     assert VIDEOS["vid2"] in index
-    assert "newrepo/agent-evals" in index and "Reel by saver (S1)" in index
+    assert "newrepo/agent-evals" in index and "saved reel one" in index
     assert (pipeline.site / "notes" / DATE / "youtube-vid1.html").exists()
     assert (pipeline.site / "archive" / "index.html").exists()
 
@@ -310,7 +310,9 @@ def test_a_github_item_rated_9_and_under_48_hours_old_is_a_diamond(pipeline):
     assert "iamond" in digest
     diamonds = digest.split("iamond", 1)[1].split("\n## ", 1)[0]
     assert "other/gizmo" in diamonds  # created a day before the run
-    assert "newrepo/agent-evals" not in diamonds  # rated 7, and three days old
+    # Rated 7 and three days old, but growing at 100 stars a day: a diamond by the GitHub rule
+    # (rating 7+ and 50+ stars a day), which applies whatever the age.
+    assert "newrepo/agent-evals" in diamonds
 
 
 def test_no_item_is_marked_processed_without_a_note_or_a_logged_drop(pipeline, caplog):

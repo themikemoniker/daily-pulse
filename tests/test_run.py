@@ -593,3 +593,23 @@ def test_enabled_must_be_a_bool(make_env, fixtures_dir, capsys):
     cfg, data, out = make_env(sources=(), extra='[sources.fake]\nenabled = "yes"\n')
     assert run(cfg, out, fixtures_dir) == 1
     assert "enabled" in capsys.readouterr().err
+
+
+class WeedingAdapter(FakeAdapter):
+    """Weeds out its first item through `rank_new`, like the GitHub relevance rating does."""
+
+    def rank_new(self, items, ctx):
+        return items[1:], [(items[0], "off-topic")]
+
+
+def test_weeding_an_item_does_not_end_the_first_run_cap(make_env, fixtures_dir):
+    registry.register(WeedingAdapter())
+    cfg, data, out = make_env(first_run_cap=1)
+    run(cfg, out, fixtures_dir)
+    sources = result(out)["sources"]["fake"]
+    all_ids = [r["id"] for r in json.loads((fixtures_dir / "fake" / "items.json").read_text())]
+    assert len(sources["items"]) == 1  # the cap still held although one item was weeded first
+    assert [d["id"] for d in sources["dropped"]] == [all_ids[0]]
+    assert sources["dropped"][0]["reason"] == "off-topic"
+    processed = json.loads((data / "state" / "processed.json").read_text())["fake"]
+    assert all_ids[0] in processed and len(processed) == len(all_ids)  # weeded + capped backlog + the one done
