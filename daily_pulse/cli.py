@@ -29,6 +29,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     config = load_config(args.config)
     date = args.date or _date.today().isoformat()
+    if args.dry_run:  # touches nothing on disk, so needs no lock
+        result = run_pipeline(config, date, args.fixtures, dry_run=True)
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0
     try:
         with RunLock(config.data_dir):
             return _run(args, config, date)

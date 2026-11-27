@@ -111,3 +111,81 @@ def test_lock_is_released_after_a_run(make_env, fixtures_dir, capsys):
     run(cfg, out, fixtures_dir)
     run(cfg, out, fixtures_dir)
     assert "another run is in progress" not in capsys.readouterr().err
+
+
+def test_deferred_and_unconfigured_adapters_record_status_without_running(make_env, fixtures_dir):
+    class Deferred(FakeAdapter):
+        def status(self, ctx):
+            return "deferred: no route to read other accounts"
+
+        def list_new(self, ctx):
+            raise AssertionError("must not be called")
+
+    class Unconfigured(Deferred):
+        def status(self, ctx):
+            return "not configured"
+
+    registry.register(Deferred("x"))
+    registry.register(Unconfigured("youtube"))
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(sources=("x", "youtube", "fake", "ghost"))
+    assert run(cfg, out, fixtures_dir) == 0
+    srcs = result(out)["sources"]
+    assert srcs["x"]["status"] == "deferred: no route to read other accounts"
+    assert srcs["youtube"]["status"] == "not configured"
+    assert srcs["ghost"]["status"] == "not configured: no adapter registered"
+    assert srcs["fake"]["status"] == "ok"
+    assert result(out)["flagged"] == []
+
+
+def test_disabled_sources_are_skipped(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(sources=(), extra="[sources.fake]\nenabled = false\n")
+    assert run(cfg, out, fixtures_dir) == 0
+    assert result(out)["sources"]["fake"]["status"] == "disabled"
+    assert result(out)["sources"]["fake"]["items"] == []
+
+
+def test_first_run_is_capped_and_the_backlog_is_not_processed_later(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(first_run_cap=1)
+    run(cfg, out, fixtures_dir)
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["a1"]  # newest first
+    run(cfg, out, fixtures_dir)
+    assert result(out)["sources"]["fake"]["items"] == []
+
+
+def test_later_runs_process_all_new_items_uncapped(make_env, fixtures_dir):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(first_run_cap=1)
+    run(cfg, out, fixtures_dir)
+    items = json.loads((fixtures_dir / "fake" / "items.json").read_text())
+    items = [{"id": f"n{k}", "title": "t", "url": "u", "author": "a"} for k in range(3)] + items
+    (fixtures_dir / "fake" / "items.json").write_text(json.dumps(items))
+    run(cfg, out, fixtures_dir)
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["n0", "n1", "n2"]
+
+
+def test_dry_run_reports_but_writes_nothing_and_does_not_mark_items_processed(
+    make_env, fixtures_dir
+):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir, "--dry-run") == 0
+    assert not data.exists()
+    assert not out.exists()
+    assert run(cfg, out, fixtures_dir) == 0
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+
+
+def test_nothing_is_written_to_cwd_data_outside_the_configured_path(
+    make_env, fixtures_dir, tmp_path, monkeypatch
+):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    run(cfg, out, fixtures_dir)
+    assert list(cwd.iterdir()) == []
+    assert (data / "state" / "processed.json").exists()

@@ -24,7 +24,7 @@ class RunResult:
         return {"date": self.date, "sources": self.sources, "flagged": self.flagged}
 
 
-def _run_adapter(name, adapter, ctx, state) -> tuple[list, Exception | None]:
+def _run_adapter(name, adapter, ctx, state, first_run_cap) -> tuple[list, Exception | None]:
     """Process one adapter's new items. Never raises; returns (items, first_error)."""
     items, error = [], None
     try:
@@ -32,9 +32,15 @@ def _run_adapter(name, adapter, ctx, state) -> tuple[list, Exception | None]:
     except Exception as exc:  # noqa: BLE001 - isolation is the point
         log.error("%s: list_new failed\n%s", name, traceback.format_exc())
         return items, exc
-    for candidate in candidates:
-        if state.is_processed(name, candidate.id):
-            continue
+    new = [c for c in candidates if not state.is_processed(name, c.id)]
+    if state.is_first_run(name):
+        # Don't chew through a backlog: keep the newest few, and mark the rest as seen
+        # so later runs only handle genuinely new items.
+        state.begin_source(name)
+        for skipped in new[first_run_cap:]:
+            state.mark_processed(name, skipped.id)
+        new = new[:first_run_cap]
+    for candidate in new:
         try:
             items.append(adapter.fetch_details(candidate, ctx))
         except Exception as exc:  # noqa: BLE001
@@ -45,14 +51,26 @@ def _run_adapter(name, adapter, ctx, state) -> tuple[list, Exception | None]:
     return items, error
 
 
-def run_pipeline(config: Config, date: str, fixtures_dir: Path | None) -> RunResult:
+def run_pipeline(
+    config: Config, date: str, fixtures_dir: Path | None, dry_run: bool = False
+) -> RunResult:
     result = RunResult(date=date)
-    state = StateStore(config.data_dir)
-    failures = FailureCounters(config.data_dir)
+    state = StateStore(config.data_dir, persist=not dry_run)
+    failures = FailureCounters(config.data_dir, persist=not dry_run)
     for name, source_cfg in config.sources.items():
+        if not source_cfg.get("enabled", True):
+            result.sources[name] = {"status": "disabled", "items": []}
+            continue
         adapter = registry.get(name)
+        if adapter is None:
+            result.sources[name] = {"status": "not configured: no adapter registered", "items": []}
+            continue
         ctx = AdapterContext(config=source_cfg, fixtures_dir=fixtures_dir, date=date)
-        items, error = _run_adapter(name, adapter, ctx, state)
+        status = adapter.status(ctx)
+        if status is not None:
+            result.sources[name] = {"status": status, "items": []}
+            continue
+        items, error = _run_adapter(name, adapter, ctx, state, config.first_run_cap)
         entry: dict = {"items": [i.to_dict() for i in items]}
         if error is None:
             failures.record_success(name)
