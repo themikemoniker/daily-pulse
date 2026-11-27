@@ -1,0 +1,40 @@
+# daily-pulse configuration. Secrets (GITHUB_TOKEN, IG_CLI_CMD) come from the environment only.
+
+[run]
+first_run_cap = 10          # newest items processed on a source's first run
+alert_after_failures = 2    # consecutive module failures before a run flags it
+
+[paths]
+data_dir = "data"           # local-only state, logs, transcripts (gitignored); relative to the cwd
+
+[sources.youtube]
+enabled = true
+playlist_url = ""           # unset until supplied; the module reports "not configured"
+
+[sources.instagram]
+enabled = true
+kinds = ["saved", "liked"]  # saved reels first, liked second
+cli_cmd_env = "IG_CLI_CMD"  # env var holding the command that prints JSON
+
+[sources.x]
+enabled = true              # module is deferred in v1; handles are stored for later
+handles = [
+  "Andrej Karpathy",
+  "Matt Pocock",
+  "Nate Herk",
+  "Simon Willison",
+  "Hamel Husain",
+  "Harrison Chase",
+  "swyx",
+  "TheSeniorDev",           # unverified
+  "Exit Node",              # unverified
+]
+
+[sources.github]
+enabled = true
+rising_days = 7
+watch_accounts = [
+  "karpathy", "mattpocock", "can1357", "simonw", "hamelsmu", "shreyashankar",
+  "jxnl", "eugeneyan", "hwchase17", "anthropics", "langchain-ai",
+]
+watch_repos = ["can1357/oh-my-pi"]  # releases, plus top contributors

@@ -189,3 +189,34 @@ def test_nothing_is_written_to_cwd_data_outside_the_configured_path(
     run(cfg, out, fixtures_dir)
     assert list(cwd.iterdir()) == []
     assert (data / "state" / "processed.json").exists()
+
+
+def test_run_never_prompts(make_env, fixtures_dir, monkeypatch):
+    import builtins
+    import sys
+
+    def no_prompt(*a, **k):
+        raise AssertionError("interactive prompt attempted")
+
+    monkeypatch.setattr(builtins, "input", no_prompt)
+    monkeypatch.setattr(sys, "stdin", None)
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0
+
+
+def test_shipped_config_runs_and_has_the_spec_seed_values(tmp_path, fixtures_dir, monkeypatch):
+    from pathlib import Path
+
+    shipped = Path(__file__).parent.parent / "config" / "daily-pulse.toml"
+    monkeypatch.chdir(tmp_path)  # the relative data_dir lands here, not in the repo
+    out = tmp_path / "out"
+    assert run(shipped, out, fixtures_dir) == 0
+    assert (tmp_path / "data" / "logs").exists()
+    from daily_pulse.config import load_config
+
+    cfg = load_config(shipped)
+    assert cfg.first_run_cap == 10
+    assert {"karpathy", "can1357", "langchain-ai"} <= set(cfg.sources["github"]["watch_accounts"])
+    assert "Simon Willison" in cfg.sources["x"]["handles"]
+    assert cfg.sources["youtube"]["playlist_url"] == ""
