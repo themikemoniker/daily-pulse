@@ -75,7 +75,8 @@ def _git(cwd: Path, *args: str) -> str:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise PublishError(f"git {args[0]} failed: {exc}") from exc
     if done.returncode != 0:
-        detail = (done.stderr.strip().splitlines() or ["no output"])[-1]
+        lines = [ln.strip() for ln in done.stderr.splitlines() if ln.strip() and not ln.startswith("hint:")]
+        detail = re.sub(r"://[^/@\s]+@", "://***@", " ".join(lines))[:300] or "no output"  # no URL credentials
         raise PublishError(f"git {args[0]} failed: {detail}")
     return done.stdout.strip()
 

@@ -189,3 +189,15 @@ def test_building_from_an_out_dir_publishes_only_the_site(make_env, remote):
     assert not [f for f in files if "transcript" in f or "state" in f or f.endswith(".txt")]
     for f in files:
         assert "FULL TRANSCRIPT" not in git(remote, "show", f"gh-pages:{f}")
+
+
+def test_a_git_failure_reports_the_whole_reason_not_just_its_last_line(cfg, site, tmp_path, capsys):
+    assert publish(cfg, site, tmp_path / "nope.git") == 1
+    err = capsys.readouterr().err
+    assert "nope.git" in err and "does not appear to be a git repository" in err
+
+
+def test_credentials_in_a_remote_url_are_not_echoed_in_errors(cfg, site, capsys):
+    assert main(["publish", "--config", str(cfg), "--site", str(site), "--no-build",
+                 "--remote", "ssh://user:hunter2pass@127.0.0.1:1/x.git"]) == 1
+    assert "hunter2pass" not in capsys.readouterr().err
