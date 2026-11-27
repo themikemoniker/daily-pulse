@@ -23,21 +23,29 @@ MAX_QUOTE_WORDS = 25  # one explicit quote
 MIN_COPY_RUN = 8  # a matching run this long counts as lifted text and spends the budget
 
 _APOS = "'’‘ʼ`"
-_WORD = re.compile(rf"[^\W_]+(?:[{_APOS}][^\W_]+)*")
-# Caption markup that sits between words: [00:10] / 00:00:01.200 timestamps, <c> tags, SRT cue numbers.
-_MARKUP = re.compile(r"<[^>]*>|\[?\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\]?|^[ \t]*\d+[ \t]*$", re.M)
+# Scripts written without spaces (kana, CJK, Bopomofo, Thai) count one character per word, so the
+# word limits still bite.
+_UNSPACED = "\u0e00-\u0e7f\u3040-\u30ff\u3100-\u312f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+_WORD = re.compile(rf"[{_UNSPACED}]|[^\W_{_UNSPACED}]+(?:[{_APOS}][^\W_{_UNSPACED}]+)*")
+# Timestamps are skipped on both sides, so [00:10] markers inserted into a copy do not break it.
+_TIMESTAMP = re.compile(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\]?")
+# Caption markup is skipped in the reference only (never in the text under test, where a
+# "<...>" wrapper could otherwise hide a copy): HTML-ish tags like <c> and SRT cue numbers.
+_REF_MARKUP = re.compile(rf"</?[A-Za-z][^<>]*>|{_TIMESTAMP.pattern}|^[ \t]*\d+[ \t]*$", re.M)
 _ZERO_WIDTH = re.compile("[​-‏⁠﻿­]")
 _QUOTED = re.compile(r'"([^"]*)"|“([^”]*)”|«([^»]*)»|„([^“”]*)[“”]')
 ELLIPSIS = "…"
+_SEP = "\x00"  # joins fields so a copy spanning adjacent fields is seen as one run
 
 
 def _clean(text: str) -> str:
     return _ZERO_WIDTH.sub("", unicodedata.normalize("NFKC", text))
 
 
-def _tokens(text: str) -> list[tuple[int, int, str]]:
-    """(start, end, normalised word) for each word of cleaned `text`, skipping caption markup."""
-    skip = [m.span() for m in _MARKUP.finditer(text)]
+def _tokens(text: str, reference: bool = False) -> list[tuple[int, int, str]]:
+    """(start, end, normalised word) for each word of cleaned `text`, skipping timestamps
+    (and, for a reference, caption markup)."""
+    skip = [m.span() for m in (_REF_MARKUP if reference else _TIMESTAMP).finditer(text)]
     out, k = [], 0
     for m in _WORD.finditer(text):
         while k < len(skip) and skip[k][1] <= m.start():
@@ -49,7 +57,7 @@ def _tokens(text: str) -> list[tuple[int, int, str]]:
 
 
 def _ref_words(reference: str) -> list[str]:
-    return [t[2] for t in _tokens(_clean(reference))]
+    return [t[2] for t in _tokens(_clean(reference), reference=True)]
 
 
 def _index(ref: list[str]) -> dict[str, list[int]]:
@@ -142,9 +150,12 @@ def _truncate_copied_runs(text: str, reference: str, budget: QuoteBudget | None)
         if budget is not None:
             keep = budget.take(keep)
         if keep < run:
-            out.append(text[pos:spans[i + keep - 1][1]] if keep else text[pos:spans[i][0]])
-            out.append(ELLIPSIS)
-            pos = spans[i + run - 1][1]
+            cut = spans[i + keep - 1][1] if keep else spans[i][0]
+            end = spans[i + run - 1][1]
+            out.append(text[pos:cut])
+            # Field separators inside the removed span stay, so the fields still split cleanly.
+            out.append(ELLIPSIS + (_SEP + ELLIPSIS) * text[cut:end].count(_SEP))
+            pos = end
         i += run
     out.append(text[pos:])
     return "".join(out)
@@ -165,10 +176,17 @@ def _limit_quoted_spans(text: str, budget: QuoteBudget) -> str:
     return _QUOTED.sub(repl, text)
 
 
+def guard_fields(fields: list[str], reference: str = "", budget: QuoteBudget | None = None) -> list[str]:
+    """Apply both rules to fields that sit next to each other in a note (a list of takeaways,
+    say). They are checked as one text, so a copy that continues from one field into the next
+    is cut instead of slipping under the per-field limit. Returns one string per field."""
+    joined = _SEP.join(_clean(f).replace(_SEP, " ") for f in fields)
+    parts = _truncate_copied_runs(joined, reference, budget).split(_SEP)
+    if budget is not None:
+        parts = [_limit_quoted_spans(p, budget) for p in parts]
+    return parts
+
+
 def guard_text(text: str, reference: str = "", budget: QuoteBudget | None = None) -> str:
     """Apply both rules to one free-text field of a note."""
-    text = _clean(text)
-    text = _truncate_copied_runs(text, reference, budget)
-    if budget is not None:
-        text = _limit_quoted_spans(text, budget)
-    return text
+    return guard_fields([text], reference, budget)[0]

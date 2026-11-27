@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 from daily_pulse.models import VERDICTS, Item, Rating
-from daily_pulse.quoteguard import MAX_COPY_RUN, QuoteBudget, guard_text, longest_copied_run
+from daily_pulse.quoteguard import MAX_COPY_RUN, QuoteBudget, guard_fields, guard_text, longest_copied_run
 
 VIDEO_SOURCES = ("youtube",)
 MAX_TAKEAWAYS = 8
@@ -78,7 +78,7 @@ def _validate(item: Item, rating: Rating, date: str) -> None:
             raise NoteError(f"beat timestamp must look like 05:30 or 1:05:30, got {beat.timestamp!r}")
 
 
-def _video(item: Item, rating: Rating, g, head: dict) -> tuple[list, list]:
+def _video(item: Item, rating: Rating, gl, head: dict) -> tuple[list, list]:
     metrics = item.metrics or {}
     front = [
         ("title", head["title"]),
@@ -91,12 +91,14 @@ def _video(item: Item, rating: Rating, g, head: dict) -> tuple[list, list]:
         ("rating", rating.rating),
         ("tags", head["tags"]),
     ]
-    body = ["## Key takeaways", *[f"- {g(t)}" for t in rating.takeaways[:MAX_TAKEAWAYS]], "",
-            "## The argument, beat by beat", *[f"- [{b.timestamp}] {g(b.text)}" for b in rating.beats]]
+    takeaways = gl([_one_line(t) for t in rating.takeaways[:MAX_TAKEAWAYS]])
+    beats = gl([_one_line(b.text) for b in rating.beats])
+    body = ["## Key takeaways", *[f"- {t}" for t in takeaways], "",
+            "## The argument, beat by beat", *[f"- [{b.timestamp}] {t}" for b, t in zip(rating.beats, beats)]]
     return front, body
 
 
-def _generic(item: Item, rating: Rating, g, head: dict) -> tuple[list, list]:
+def _generic(item: Item, rating: Rating, gl, head: dict) -> tuple[list, list]:
     front = [
         ("title", head["title"]),
         ("source", item.source),
@@ -108,7 +110,7 @@ def _generic(item: Item, rating: Rating, g, head: dict) -> tuple[list, list]:
         ("verdict", rating.verdict),
         ("tags", head["tags"]),
     ]
-    return front, ["## Summary", "", g(rating.summary)]
+    return front, ["## Summary", "", gl([_one_line(rating.summary)])[0]]
 
 
 def render_note(item: Item, rating: Rating, date: str, transcript: str = "") -> str:
@@ -119,9 +121,13 @@ def render_note(item: Item, rating: Rating, date: str, transcript: str = "") -> 
     budget = QuoteBudget()
     # Explicit quotes spend the budget first, then quoted spans inside the free text.
     quotes = [q for q in (budget.fit(_one_line(q)) for q in rating.quotes) if q]
+    quotes = guard_fields(quotes, reference)  # adjacent quotes must not add up to one long copy
+
+    def gl(fields: list[str]) -> list[str]:
+        return guard_fields(fields, reference, budget)
 
     def g(text: str) -> str:
-        return guard_text(_one_line(text), reference, budget)
+        return gl([_one_line(text)])[0]
 
     # Title, author and tags are free text too: guard them once and reuse the result.
     # The title appears twice (frontmatter and heading), so it may spend only half the remainder
@@ -130,8 +136,8 @@ def render_note(item: Item, rating: Rating, date: str, transcript: str = "") -> 
     head = {"title": guard_text(_one_line(item.title), reference, title_budget)}
     budget.used += 2 * title_budget.used
     head["author"] = g(item.author)
-    head["tags"] = [g(t) for t in rating.tags or []]
-    front, middle = (_video if item.source in VIDEO_SOURCES else _generic)(item, rating, g, head)
+    head["tags"] = gl([_one_line(t) for t in rating.tags or []])
+    front, middle = (_video if item.source in VIDEO_SOURCES else _generic)(item, rating, gl, head)
     body = [f"# {head['title']}", "", *middle, ""]
     if quotes:
         body += ["## Quotes", "", *[f"> {q}" for q in quotes], ""]
@@ -143,15 +149,16 @@ def render_note(item: Item, rating: Rating, date: str, transcript: str = "") -> 
     return text
 
 
-def _write_atomic(path: Path, text: str) -> None:
+def _write_atomic(path: Path, text: str, mode: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.read_text(encoding="utf-8") == text:
+        os.chmod(path, mode)
         return
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
-        os.chmod(tmp, 0o644)  # mkstemp makes it 0600; notes are published files
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -162,12 +169,12 @@ def write_note(item: Item, rating: Rating, notes_dir: Path, date: str, transcrip
     """Write the note for one item; writing the same item twice gives the identical file."""
     text = render_note(item, rating, date, transcript)
     path = Path(notes_dir) / date / f"{_safe_name(item.source, item.id)}.md"
-    _write_atomic(path, text)
+    _write_atomic(path, text, 0o644)  # published, so world-readable
     return path
 
 
 def write_transcript(data_dir: Path, item: Item, text: str) -> Path:
     """Keep the full transcript/caption locally. The only place one is ever written."""
     path = Path(data_dir) / "transcripts" / f"{_safe_name(item.source, item.id)}.txt"
-    _write_atomic(path, text)
+    _write_atomic(path, text, 0o600)  # private to the host
     return path

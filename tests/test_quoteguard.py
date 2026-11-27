@@ -99,3 +99,18 @@ def test_short_lifted_runs_spend_the_budget_too():
     out = " / ".join(guard_text(p, ref, budget) for p in pieces)
     from daily_pulse.quoteguard import copied_word_count
     assert copied_word_count(out, ref, min_run=5) <= 49
+
+
+# --- PR review: angle brackets, unspaced scripts ---------------------------------------------
+
+def test_copy_wrapped_in_angle_brackets_is_still_caught():
+    wrapped = "<" + _plain(60) + ">"
+    assert longest_copied_run(wrapped, _plain(80)) == 60
+    assert longest_copied_run(guard_text(wrapped, _plain(80)), _plain(80)) <= 40
+
+
+def test_cjk_text_is_counted_and_limited_per_character():
+    ref = "".join(chr(0x4E00 + i) for i in range(200))  # 200 CJK characters, no spaces
+    copy = "要点是" + ref[10:110]
+    assert longest_copied_run(guard_text(copy, ref), ref) <= 40
+    assert len(re.findall(r"[一-鿿]", QuoteBudget().fit(ref))) <= 49

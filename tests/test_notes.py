@@ -1,5 +1,10 @@
+import re
+
+import pytest
+
 from daily_pulse.models import Beat, Item, Rating
-from daily_pulse.notes import write_note
+from daily_pulse.notes import NoteError, write_note, write_transcript
+from daily_pulse.quoteguard import copied_word_count, longest_copied_run
 
 DATE = "2026-01-15"
 
@@ -47,7 +52,6 @@ def test_video_note_has_frontmatter_and_structured_body(tmp_path):
     assert body.rstrip().endswith("## Verdict\n\nwatch")
 
 
-import pytest
 
 
 def generic_item(source):
@@ -89,9 +93,7 @@ def test_writing_the_same_item_twice_yields_the_identical_file(tmp_path):
     assert sorted(p.name for p in first.parent.iterdir()) == ["youtube-abc123.md"]
 
 
-import re
 
-from daily_pulse.notes import write_transcript
 
 TRANSCRIPT = " ".join(f"word{i}" for i in range(120))
 
@@ -111,7 +113,6 @@ def test_note_never_copies_more_than_forty_words_of_the_transcript(tmp_path):
         beats=[Beat("01:00", copied)],
     )
     path = write_note(video_item(), rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT)
-    from daily_pulse.quoteguard import longest_copied_run
     assert longest_copied_run(path.read_text(), TRANSCRIPT) <= 40
     assert "word64" not in path.read_text()
 
@@ -135,19 +136,19 @@ def test_short_quotes_are_kept_as_blockquotes(tmp_path):
 def test_transcript_goes_only_under_data_transcripts(tmp_path):
     notes, data = tmp_path / "notes", tmp_path / "data"
     item = video_item()
+    leaky = " ".join(f"word{i}" for i in range(50, 110))  # rating text that copies the transcript
     path = write_transcript(data, item, TRANSCRIPT)
-    write_note(item, video_rating(), notes, DATE, transcript=TRANSCRIPT)
+    write_note(item, video_rating(takeaways=[leaky] * 5, reason=leaky), notes, DATE, transcript=TRANSCRIPT)
 
     assert path == data / "transcripts" / "youtube-abc123.txt"
     assert path.read_text() == TRANSCRIPT
+    assert [p for p in tmp_path.rglob("*") if p.is_file() and "transcripts" in p.parts] == [path]
     for note in notes.rglob("*"):
         if note.is_file():
-            assert "word50 word51 word52" not in note.read_text()
+            assert "word50 word51 word52" not in note.read_text() or longest_copied_run(note.read_text(), TRANSCRIPT) <= 40
+            assert note.read_text() != TRANSCRIPT and TRANSCRIPT not in note.read_text()
     assert write_transcript(data, item, TRANSCRIPT) == path  # idempotent
     assert path.read_text() == TRANSCRIPT
-
-
-from daily_pulse.notes import NoteError
 
 
 @pytest.mark.parametrize("over", [{"rating": 0}, {"rating": 11}, {"rating": "8"}, {"verdict": "binge"},
@@ -196,10 +197,21 @@ def test_total_words_lifted_from_the_transcript_stay_under_fifty_across_all_fiel
     assert copied_word_count(text, TRANSCRIPT) <= 49
 
 
+def test_total_words_lifted_from_the_transcript_stay_under_fifty_across_all_fields(tmp_path):
+    copied = " ".join(f"word{i}" for i in range(5, 65))
+    rating = video_rating(
+        quotes=[copied, copied],
+        takeaways=[f"He explains {copied}"] * 5,
+        beats=[Beat("01:00", copied), Beat("02:00", copied)],
+        reason=copied,
+    )
+    text = write_note(video_item(), rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT).read_text()
+    assert copied_word_count(text, TRANSCRIPT) <= 49
+
+
 # --- review round ------------------------------------------------------------------------------
 
 def test_title_author_and_tags_are_guarded_and_share_the_budget(tmp_path):
-    from daily_pulse.quoteguard import copied_word_count
     item = video_item()
     item.title = " ".join(f"word{i}" for i in range(0, 40))
     item.author = " ".join(f"word{i}" for i in range(40, 80))
@@ -254,3 +266,19 @@ def test_very_long_ids_still_get_a_valid_filename(tmp_path):
 def test_unicode_digit_dates_are_refused(tmp_path):
     with pytest.raises(NoteError):
         write_note(video_item(), video_rating(), tmp_path / "notes", "２０２６-01-15")
+
+
+def test_transcripts_are_private_but_notes_are_readable(tmp_path):
+    transcript = write_transcript(tmp_path / "data", video_item(), TRANSCRIPT)
+    note = write_note(video_item(), video_rating(), tmp_path / "notes", DATE)
+    assert transcript.stat().st_mode & 0o777 == 0o600
+    assert note.stat().st_mode & 0o777 == 0o644
+
+
+def test_contiguous_copy_spread_over_adjacent_fields_is_truncated_not_lost(tmp_path):
+    chunks = [" ".join(f"word{i}" for i in range(s, s + 25)) for s in (0, 25, 50)]  # 75 words in a row
+    rating = video_rating(takeaways=chunks + ["Plain one", "Plain two"],
+                          quotes=[chunks[0], chunks[1]])
+    path = write_note(video_item(), rating, tmp_path / "notes", DATE, transcript=TRANSCRIPT)
+    assert longest_copied_run(path.read_text(), TRANSCRIPT) <= 40
+    assert "Plain two" in path.read_text()
