@@ -370,3 +370,30 @@ def test_a_failed_attempt_that_spends_the_last_call_is_a_cap_hit_not_a_source_fa
     assert pipeline.claude.calls == 1
     assert src["status"] == "ok" and "instagram" not in pipeline.result()["flagged"]
     assert not noted(pipeline, "instagram") and not processed(pipeline).get("instagram")  # retried next run
+
+
+def test_a_creator_added_with_watch_add_reaches_the_digest_and_removing_it_stops_it(pipeline, capsys):
+    yt = pipeline.fixtures / "youtube"
+    channel = "https://www.youtube.com/@demochannel"
+    (yt / "channels.json").write_text(json.dumps({channel: [
+        {"id": "chanvid", "title": "A creator's new video", "channel": "Demo", "duration": 900}]}))
+    (yt / "chanvid.info.json").write_text(json.dumps(
+        {"id": "chanvid", "title": "A creator's new video", "channel": "Demo", "duration": 900,
+         "upload_date": "20260112", "view_count": 1000, "description": "About loops."}))
+    (yt / "chanvid.en.vtt").write_text(FIXTURE_VTT.read_text())
+
+    assert main(["watch", "add", channel, "--config", str(pipeline.cfg)]) == 0  # nothing but the command
+    pipeline.go()
+    notes = {p.name for p in (pipeline.out / "notes" / DATE).glob("*.md")}
+    assert "youtube-chanvid.md" in notes and {"youtube-vid1.md", "youtube-vid2.md"} <= notes
+    digest = (pipeline.out / "digests" / f"{DATE}.md").read_text()
+    assert "A creator's new video" in digest
+
+    assert main(["watch", "list", "--config", str(pipeline.cfg)]) == 0
+    assert "@demochannel" in capsys.readouterr().out
+    assert main(["watch", "remove", channel, "--config", str(pipeline.cfg)]) == 0
+    (yt / "channels.json").write_text(json.dumps({channel: [
+        {"id": "chanvid2", "title": "A later video", "channel": "Demo", "duration": 900}]}))
+    pipeline.go()  # the channel is no longer watched, so its newer video is not listed or noted
+    notes = {p.name for p in (pipeline.out / "notes" / DATE).glob("*.md")}
+    assert "youtube-chanvid2.md" not in notes

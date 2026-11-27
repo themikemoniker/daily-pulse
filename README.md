@@ -25,6 +25,25 @@ yet, so they do not reach the digest or the site. **X** is deferred (see [Deferr
    `IG_CLI_CMD` (the Instagram command), `DAILY_PULSE_CLAUDE` (overrides `claude_cmd`), `DAILY_PULSE_YTDLP`.
 4. `claude` must be on the PATH of whatever runs the pipeline; it uses your Claude subscription, no API key.
 
+## Watching creators
+
+Add a creator with one command; the next run picks them up. The list lives in `config/watchlist.toml` (public handles only, committed like the rest of the config) and is merged into the source settings on every run.
+
+```
+daily-pulse watch add https://www.youtube.com/@aiDotEngineer   # a YouTube channel
+daily-pulse watch add https://github.com/karpathy              # a GitHub account
+daily-pulse watch add can1357/oh-my-pi                         # a GitHub repo's releases
+daily-pulse watch add swyx --source x                          # a bare handle needs --source
+daily-pulse watch list
+daily-pulse watch remove swyx --source x
+```
+
+- The platform is detected from a profile URL (YouTube `@handle`, `/channel/UC...`, `/c/`, `/user/`; GitHub; X; Instagram). A video or playlist link, a site page such as `github.com/orgs/...`, or a bare name without `--source` is refused with a hint. `watch add` makes no network call, so it does not check that the account exists.
+- Adding is idempotent and case-insensitive. The file is regenerated on every change, so hand-written comments in it are not kept.
+- **YouTube channels** list their newest `channel_limit` uploads per run (default 5, `[sources.youtube] channel_limit`), shared round-robin with the playlist so the first-run cap and call cap spread across creators. A channel that cannot be listed is logged and skipped. The quality gate (minimum rating, duration, blocklists) applies as before.
+- **GitHub** accounts and repos are merged into `watch_accounts` and `watch_repos`.
+- **X and Instagram** handles are stored but stay inert: X is paid and stays off until you enable it, Instagram needs a configured CLI. Adding a handle never turns a source on or spends anything.
+
 ## Privacy rules
 
 - Transcripts, captions, processed-ID state, triage logs and run logs stay under `data/` (gitignored, never
@@ -109,7 +128,7 @@ identical files.
 
 ## YouTube source
 
-- Set `[sources.youtube] playlist_url` to a public playlist (the shipped config points at the "brain" playlist). While it is empty the source reports `not configured` and the run carries on.
+- Set `[sources.youtube] playlist_url` to a public playlist (the shipped config points at the "brain" playlist). With neither a playlist nor a watched channel (`[sources.youtube] channels`, see Watching creators) the source reports `not configured` and the run carries on.
 - yt-dlp is needed at run time (it is not a Python dependency). `scripts/install-ytdlp.sh` installs it into the repo's `.venv` with a plain pip install (no sudo). Point the config at the binary with `ytdlp_cmd = "/path/to/repo/.venv/bin/yt-dlp"` in `[sources.youtube]` (cron has a short PATH, so use the full path), or set `$DAILY_PULSE_YTDLP`, which wins over the config. With `--fixtures` the adapter reads recorded output from `<fixtures>/youtube/` (`playlist.json`, `<id>.info.json`, `<id>.en.vtt` for manual subtitles, `<id>.en.auto.vtt` for auto captions) and never runs yt-dlp.
 - The playlist is read with `yt-dlp --flat-playlist -J`. Entries that carry an upload date are ordered by it, newest first. Otherwise `playlist_order` in `[sources.youtube]` says how the list is ordered: `"newest_first"` or `"oldest_first"` (new videos appended at the bottom, as in the shipped playlist). When it is unset the order is detected by comparing the upload dates of the first and last entries (two `-J` calls, remembered in `<data_dir>/state/youtube-order.json`; if the dates cannot tell, it is newest first and a warning is logged). The first-run cap keeps the newest videos that pass the [quality gate](#quality-gate). Private and deleted placeholder entries are skipped. Each new video then gets `-J` metadata (title, channel, duration, upload date, views) and English captions: manual subtitles first, auto captions only if there are none.
 - Captions are requested with `--sub-langs en.*,en` and the file is chosen deterministically (`.en.vtt` if present, else the first by name). They are cleaned (markup and entities removed; rolling auto-caption repeats removed for auto captions only, never from manual subtitles; `[mm:ss]` timestamps kept). Captions that are nothing but sound tags such as `[Music]` count as no captions (manual ones then fall back to auto captions) and saved only to `<data_dir>/transcripts/youtube-<id>.txt`. The cleaned text goes to the summarizer, and the note (`<out>/notes/<date>/youtube-<id>.md`) holds an own-words summary, takeaways, a timestamped argument and short quotes, all passing the quote guard.
