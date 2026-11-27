@@ -8,7 +8,11 @@ from pathlib import Path
 
 
 class LockHeld(Exception):
-    pass
+    """Another run holds the lock."""
+
+
+class LockError(Exception):
+    """The lock could not be taken for a reason other than another run holding it."""
 
 
 class RunLock:
@@ -17,13 +21,19 @@ class RunLock:
         self._fh = None
 
     def __enter__(self) -> "RunLock":
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(self._path, "w")
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(self._path, "w")
+        except OSError as exc:
+            raise LockError(f"cannot create run lock {self._path}: {exc}") from exc
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             fh.close()
             raise LockHeld(str(self._path)) from None
+        except OSError as exc:
+            fh.close()
+            raise LockError(f"cannot take run lock {self._path}: {exc}") from exc
         self._fh = fh
         return self
 

@@ -205,11 +205,14 @@ def test_run_never_prompts(make_env, fixtures_dir, monkeypatch):
     assert run(cfg, out, fixtures_dir) == 0
 
 
-def test_shipped_config_runs_and_has_the_spec_seed_values(tmp_path, fixtures_dir, monkeypatch):
+def test_shipped_config_runs_and_has_the_spec_seed_values(tmp_path, fixtures_dir):
+    import shutil
     from pathlib import Path
 
-    shipped = Path(__file__).parent.parent / "config" / "daily-pulse.toml"
-    monkeypatch.chdir(tmp_path)  # the relative data_dir lands here, not in the repo
+    real = Path(__file__).parent.parent / "config" / "daily-pulse.toml"
+    shipped = tmp_path / "config" / "daily-pulse.toml"  # copy, so data/ lands in tmp_path
+    shipped.parent.mkdir()
+    shutil.copy(real, shipped)
     out = tmp_path / "out"
     assert run(shipped, out, fixtures_dir) == 0
     assert (tmp_path / "data" / "logs").exists()
@@ -320,3 +323,154 @@ def test_duplicate_ids_in_one_listing_are_processed_once(make_env, fixtures_dir)
     cfg, data, out = make_env()
     run(cfg, out, fixtures_dir)
     assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["a1", "a2"]
+
+
+# --- review feedback (PR #13) -------------------------------------------------------------
+
+def _not_root():
+    import os
+
+    import pytest
+
+    if os.geteuid() == 0:
+        pytest.skip("permission-based tests need a non-root user")
+
+
+def test_empty_first_listing_does_not_end_the_first_run_cap(make_env, fixtures_dir):
+    (fixtures_dir / "fake" / "items.json").write_text("[]")
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(first_run_cap=2)
+    run(cfg, out, fixtures_dir)
+    assert result(out)["sources"]["fake"]["items"] == []
+    big = [{"id": f"b{k}", "title": "t", "url": "u", "author": "a"} for k in range(300)]
+    (fixtures_dir / "fake" / "items.json").write_text(json.dumps(big))
+    run(cfg, out, fixtures_dir)
+    assert [i["id"] for i in result(out)["sources"]["fake"]["items"]] == ["b0", "b1"]
+    run(cfg, out, fixtures_dir)
+    assert result(out)["sources"]["fake"]["items"] == []  # the rest of the backlog stays skipped
+
+
+def test_requires_python_matches_what_the_code_needs():
+    import tomllib
+    from pathlib import Path
+
+    pyproject = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
+    assert pyproject["project"]["requires-python"] == ">=3.11"  # tomllib is 3.11+
+
+
+def test_out_dir_that_rejects_writes_is_caught_before_any_item_is_consumed(
+    make_env, fixtures_dir, capsys
+):
+    _not_root()
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    out.mkdir()
+    out.chmod(0o500)
+    try:
+        assert run(cfg, out, fixtures_dir) == 1
+        assert "cannot write" in capsys.readouterr().err
+    finally:
+        out.chmod(0o700)
+    assert not (data / "state" / "processed.json").exists()
+    assert run(cfg, out, fixtures_dir) == 0
+    assert len(result(out)["sources"]["fake"]["items"]) == 2
+
+
+def test_result_write_failure_keeps_earlier_result_and_saves_items_locally(
+    make_env, fixtures_dir, capsys
+):
+    _not_root()
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    assert run(cfg, out, fixtures_dir) == 0  # earlier result for the date, with 2 items
+    earlier = (out / "run-2026-01-15.json").read_text()
+
+    class LockOut(FakeAdapter):
+        def list_new(self, ctx):
+            out.chmod(0o500)  # out becomes unwritable mid-run, after the preflight
+            return [self._item("n1")]
+
+        def _item(self, i):
+            from daily_pulse.models import Item
+
+            return Item(source="fake", id=i, url="u", title="t")
+
+    registry._ADAPTERS["fake"] = LockOut()
+    try:
+        assert run(cfg, out, fixtures_dir) == 1
+    finally:
+        out.chmod(0o700)
+    err = capsys.readouterr().err
+    assert "cannot write result" in err and "run-2026-01-15.unsaved.json" in err
+    assert (out / "run-2026-01-15.json").read_text() == earlier  # not renamed away
+    unsaved = json.loads((data / "logs" / "run-2026-01-15.unsaved.json").read_text())
+    assert [i["id"] for i in unsaved["sources"]["fake"]["items"]] == ["n1"]
+
+
+def test_state_write_failure_aborts_with_a_state_error_not_an_adapter_failure(
+    make_env, fixtures_dir, capsys
+):
+    _not_root()
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    (data / "state").chmod(0o500)
+    try:
+        assert run(cfg, out, fixtures_dir) == 1
+    finally:
+        (data / "state").chmod(0o700)
+    err = capsys.readouterr().err
+    assert "cannot write state" in err and "Traceback" not in err
+    res = result(out)  # the partial result is still written
+    assert res["sources"]["fake"]["status"] == "aborted"
+    assert "cannot write state" in res["error"]
+    assert not (data / "state" / "failures.json").exists()  # the source wasn't blamed
+
+
+def test_invalid_config_values_are_a_clean_error(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env(first_run_cap=-1)
+    assert run(cfg, out, fixtures_dir) == 1
+    assert "first_run_cap" in capsys.readouterr().err
+    cfg.write_text(cfg.read_text().replace("first_run_cap = -1", 'first_run_cap = "ten"'))
+    assert run(cfg, out, fixtures_dir) == 1
+    assert "first_run_cap" in capsys.readouterr().err
+    assert not data.exists()
+
+
+def test_state_file_of_the_wrong_shape_is_a_state_error(make_env, fixtures_dir, capsys):
+    registry.register(FakeAdapter())
+    cfg, data, out = make_env()
+    (data / "state").mkdir(parents=True)
+    for body in ("[]", "null", '{"fake": "oops"}'):
+        (data / "state" / "processed.json").write_text(body)
+        assert run(cfg, out, fixtures_dir) == 1
+        err = capsys.readouterr().err
+        assert "processed.json" in err and "Traceback" not in err
+
+
+def test_relative_data_dir_is_resolved_against_the_config_file_not_the_cwd(
+    fixtures_dir, tmp_path, monkeypatch
+):
+    registry.register(FakeAdapter())
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    cfg = conf / "c.toml"
+    cfg.write_text('[paths]\ndata_dir = "data"\n[sources.fake]\nenabled = true\n')
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert run(cfg, tmp_path / "out", fixtures_dir) == 0
+    assert (conf / "data" / "state" / "processed.json").exists()
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_unusable_lock_location_is_a_clean_error(make_env, fixtures_dir, tmp_path, capsys):
+    registry.register(FakeAdapter())
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file")
+    cfg, data, out = make_env(extra="")
+    cfg.write_text(cfg.read_text().replace(str(data), str(blocker / "data")))
+    assert run(cfg, out, fixtures_dir) == 1
+    err = capsys.readouterr().err
+    assert "run lock" in err and "Traceback" not in err

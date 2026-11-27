@@ -5,7 +5,7 @@ first_run_cap = 10          # newest items processed on a source's first run
 alert_after_failures = 2    # consecutive module failures before a run flags it
 
 [paths]
-data_dir = "data"           # local-only state, logs, transcripts (gitignored); relative to the cwd
+data_dir = "../data"        # local-only state, logs, transcripts (gitignored); relative to this file
 
 [sources.youtube]
 enabled = true

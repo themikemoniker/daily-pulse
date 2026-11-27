@@ -26,30 +26,48 @@ class StateError(Exception):
     """State on disk is unreadable. Never guess: resetting would reprocess everything."""
 
 
-def _read_json(path: Path) -> dict:
+def _read_json(path: Path, value_type: type) -> dict:
+    """Read a state file: an object whose values are all `value_type`."""
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except FileNotFoundError:
         return {}
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
         raise StateError(f"cannot read state file {path}: {exc}. Fix or remove it and re-run.") from exc
+    if not isinstance(data, dict) or not all(isinstance(v, value_type) for v in data.values()):
+        raise StateError(
+            f"state file {path} has an unexpected shape (expected an object of "
+            f"{value_type.__name__}s). Fix or remove it and re-run."
+        )
+    return data
+
+
+def _flush_json(path: Path, payload: dict) -> None:
+    try:
+        atomic_write_json(path, payload)
+    except OSError as exc:
+        raise StateError(f"cannot write state file {path}: {exc}") from exc
 
 
 class StateStore:
     def __init__(self, data_dir: Path, persist: bool = True):
         self._persist = persist
         self._processed_path = Path(data_dir) / "state" / "processed.json"
-        self._processed: dict[str, list[str]] = _read_json(self._processed_path)
+        self._processed: dict[str, list[str]] = _read_json(self._processed_path, list)
         self._seen: dict[str, set[str]] = {k: set(v) for k, v in self._processed.items()}
 
     def is_first_run(self, source: str) -> bool:
-        return source not in self._processed
+        """True until the source has at least one processed item, so an empty first
+        listing doesn't end the first-run cap."""
+        return not self._processed.get(source)
 
     def is_processed(self, source: str, item_id: str) -> bool:
         return item_id in self._seen.get(source, ())
 
     def mark_processed(self, source: str, *item_ids: str) -> None:
         """Record items (one flush for the whole call, so pass one id per item as it completes)."""
+        if not item_ids:
+            return
         ids = self._processed.setdefault(source, [])
         seen = self._seen.setdefault(source, set())
         for item_id in item_ids:
@@ -60,7 +78,7 @@ class StateStore:
 
     def _flush(self) -> None:
         if self._persist:
-            atomic_write_json(self._processed_path, self._processed)
+            _flush_json(self._processed_path, self._processed)
 
 
 class FailureCounters:
@@ -69,7 +87,7 @@ class FailureCounters:
     def __init__(self, data_dir: Path, persist: bool = True):
         self._persist = persist
         self._path = Path(data_dir) / "state" / "failures.json"
-        self._counters: dict[str, dict] = _read_json(self._path)
+        self._counters: dict[str, dict] = _read_json(self._path, dict)
 
     def consecutive(self, module: str) -> int:
         return self._counters.get(module, {}).get("consecutive", 0)
@@ -90,4 +108,4 @@ class FailureCounters:
 
     def _flush(self) -> None:
         if self._persist:
-            atomic_write_json(self._path, self._counters)
+            _flush_json(self._path, self._counters)
