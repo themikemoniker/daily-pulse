@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -15,6 +16,7 @@ from pathlib import Path
 from daily_pulse.adapters.registry import register_builtin
 from daily_pulse.config import DEFAULT_CONFIG, ConfigError, load_config
 from daily_pulse.digest import parse_time, write_digest
+from daily_pulse.publish import PublishError, publish_site
 from daily_pulse.lock import LockError, LockHeld, RunLock
 from daily_pulse.runner import run_pipeline
 from daily_pulse.site import build_site
@@ -48,6 +50,14 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--date", default=None, type=_iso_date, help="day shown on index.html (default: today)")
     s.add_argument("--out", type=Path, required=True, help="output directory holding notes/ and digests/")
     s.add_argument("--site", type=Path, default=None, help="site directory (default: <out>/site)")
+    u = sub.add_parser("publish", help="force-push the site as the sole content of the gh-pages branch")
+    u.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    u.add_argument("--date", default=None, type=_iso_date, help="day shown on index.html (default: today)")
+    u.add_argument("--out", type=Path, default=None, help="output directory the site is built from (default: none)")
+    u.add_argument("--site", type=Path, default=None, help="site directory (default: <out>/site)")
+    u.add_argument("--no-build", action="store_true", help="publish the site directory as it is")
+    u.add_argument("--remote", default=None, help="git remote URL or path (default: this repo's origin)")
+    u.add_argument("--branch", default="gh-pages")
     return p
 
 
@@ -61,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"daily-pulse: cannot load config {args.config}: {exc}", file=sys.stderr)
         return 1
     register_builtin()
+    if args.command == "publish":
+        return _publish(args, config, args.date or _date.today().isoformat())
     date = args.date or _date.today().isoformat()
     if args.command == "digest":
         return _digest(args, config, date)
@@ -113,6 +125,34 @@ def _site(args, date: str) -> int:
         print(f"daily-pulse: cannot build site at {site}: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def _publish(args, config, date: str) -> int:
+    site = args.site or (args.out / "site" if args.out else None)
+    if site is None:
+        print("daily-pulse: publish needs --site or --out", file=sys.stderr)
+        return 1
+    try:
+        if not args.no_build:
+            if args.out is None:
+                raise PublishError("building the site needs --out (or pass --no-build)")
+            build_site(args.out, site, date)
+        publish_site(site, args.remote or _origin_url(), args.branch, forbidden=(config.data_dir,))
+    except Exception as exc:  # noqa: BLE001 - say so cleanly rather than a traceback
+        print(f"daily-pulse: cannot publish {site}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _origin_url() -> str:
+    try:
+        done = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PublishError(f"cannot read the origin remote: {exc}") from exc
+    if done.returncode != 0 or not done.stdout.strip():
+        raise PublishError("no --remote given and this directory has no 'origin' remote")
+    return done.stdout.strip()
 
 
 def _preflight_out(out: Path) -> None:
