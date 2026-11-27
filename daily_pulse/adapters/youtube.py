@@ -16,6 +16,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import time
 from datetime import date as _date
 from pathlib import Path
 
@@ -107,6 +108,16 @@ class YtDlpError(Exception):
     """yt-dlp failed, or printed something unusable."""
 
 
+class YtDlpRateLimited(YtDlpError):
+    """YouTube answered 429 and the client's backoff retries did not clear it. It says nothing
+    about the video: the source stops for the run and the video is never counted against."""
+
+
+RATE_LIMITED = re.compile(r"http error 429|too many requests", re.I)
+DEFAULT_PACE_SECONDS = 3.0  # pause between yt-dlp calls
+DEFAULT_BACKOFF_SECONDS = (30.0, 90.0)  # waits before the retries of a call that got a 429
+
+
 YTDLP_ENV = "DAILY_PULSE_YTDLP"
 YTDLP_TIMEOUT = 180.0  # seconds per yt-dlp call
 
@@ -115,22 +126,48 @@ class ProcessYtDlp:
     """The real client: runs the yt-dlp binary. `cmd` is a command string ("yt-dlp", or the path
     to the copy `scripts/install-ytdlp.sh` put in the virtualenv)."""
 
-    def __init__(self, cmd: str = "yt-dlp", timeout: float = YTDLP_TIMEOUT):
+    def __init__(self, cmd: str = "yt-dlp", timeout: float = YTDLP_TIMEOUT, extra_args=(),
+                 pace: float = 0.0, backoff=(), sleep=time.sleep):
+        """`extra_args` go on every call; `pace` seconds are waited between calls; a call that
+        gets a 429 is retried after each wait in `backoff` (seconds). The defaults wait for
+        nothing, so tests and callers that do not ask for pacing never sleep."""
         self.cmd = cmd
         self.timeout = timeout
+        self.extra_args = list(extra_args)
+        self.pace = pace
+        self.backoff = tuple(backoff)
+        self._sleep = sleep
+        self._calls = 0
 
     def _exec(self, *args: str, warnings: bool = False) -> subprocess.CompletedProcess:
+        """One yt-dlp call, paced; a 429 is retried after each wait in `backoff` and then raised
+        as YtDlpRateLimited."""
+        for wait in (*self.backoff, None):
+            try:
+                return self._exec_once(*args, warnings=warnings)
+            except YtDlpRateLimited as exc:
+                if wait is None:
+                    raise
+                log.warning("youtube: rate limited by YouTube (429), waiting %ss before retrying: %s",
+                            f"{wait:g}", str(exc)[-120:])
+                self._sleep(wait)
+
+    def _exec_once(self, *args: str, warnings: bool = False) -> subprocess.CompletedProcess:
         quiet = [] if warnings else ["--no-warnings"]
+        if self._calls and self.pace > 0:
+            self._sleep(self.pace)
+        self._calls += 1
         try:
-            proc = subprocess.run([*shlex.split(self.cmd), *quiet, *args], capture_output=True,
-                                  text=True, encoding="utf-8", errors="replace", timeout=self.timeout,
-                                  stdin=subprocess.DEVNULL)
+            proc = subprocess.run([*shlex.split(self.cmd), *self.extra_args, *quiet, *args],
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                  timeout=self.timeout, stdin=subprocess.DEVNULL)
         except (OSError, ValueError) as exc:
             raise YtDlpError(f"cannot run {self.cmd!r}: {exc}") from None
         except subprocess.TimeoutExpired:
             raise YtDlpError(f"yt-dlp timed out after {self.timeout}s") from None
         if proc.returncode != 0:
-            raise YtDlpError(f"yt-dlp exit {proc.returncode}: {proc.stderr.strip()[-300:]}")
+            message = f"yt-dlp exit {proc.returncode}: {proc.stderr.strip()[-300:]}"
+            raise (YtDlpRateLimited if RATE_LIMITED.search(proc.stderr) else YtDlpError)(message)
         return proc
 
     def _run(self, *args: str) -> str:
@@ -170,7 +207,8 @@ class ProcessYtDlp:
                           "-o", str(Path(dest) / "%(id)s.%(ext)s"), url, warnings=True)
         found = self._pick(sorted(Path(dest).glob("*.vtt")))
         if found is None and SUBTITLE_FAILURE.search(proc.stderr):
-            raise YtDlpError(f"subtitle download failed: {proc.stderr.strip()[-300:]}")
+            message = f"subtitle download failed: {proc.stderr.strip()[-300:]}"
+            raise (YtDlpRateLimited if RATE_LIMITED.search(proc.stderr) else YtDlpError)(message)
         return found
 
 
@@ -202,7 +240,31 @@ def make_client(config: dict, fixtures_dir: Path | None, env=None):
         return FixtureYtDlp(Path(fixtures_dir) / "youtube")
     env = os.environ if env is None else env
     cmd = (env.get(YTDLP_ENV) or "").strip() or str(config.get("ytdlp_cmd") or "").strip() or "yt-dlp"
-    return ProcessYtDlp(cmd)
+    return ProcessYtDlp(cmd, extra_args=_str_list(config, "ytdlp_extra_args", []),
+                        pace=_seconds(config, "pace_seconds", DEFAULT_PACE_SECONDS),
+                        backoff=tuple(_seconds_list(config, "rate_limit_backoff_seconds", DEFAULT_BACKOFF_SECONDS)))
+
+
+def _seconds(config: dict, key: str, default: float) -> float:
+    value = config.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError(f"[sources.youtube] {key} must be a number of seconds, 0 or more, got {value!r}")
+    return float(value)
+
+
+def _seconds_list(config: dict, key: str, default) -> list[float]:
+    value = config.get(key, list(default))
+    if not isinstance(value, list) or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0
+                                          for v in value):
+        raise ValueError(f"[sources.youtube] {key} must be a list of seconds (numbers, 0 or more), got {value!r}")
+    return [float(v) for v in value]
+
+
+def _str_list(config: dict, key: str, default) -> list[str]:
+    value = config.get(key, default)
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError(f"[sources.youtube] {key} must be a list of strings, got {value!r}")
+    return list(value)
 
 
 class SummaryFailed(Exception):
@@ -419,6 +481,13 @@ class YouTubeAdapter(SourceAdapter):
         error skips the video at once. Any other failure is a strike, and the MAX_ATTEMPTS-th raises
         ItemSkipped (the runner marks the video processed, so it stops failing the source)."""
         message = str(exc)
+        if isinstance(exc, YtDlpRateLimited):
+            # YouTube is throttling this machine, not this video: stop for the run, count nothing.
+            self._source_failed.add(item.id)
+            self._halted = message
+            self._pending_source.clear()
+            self._uncount(ctx)
+            return
         if SOURCE_LEVEL_ERRORS.search(message):
             self._source_level_failure(item, message, ctx)
             return

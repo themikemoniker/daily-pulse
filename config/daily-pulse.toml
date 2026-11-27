@@ -29,6 +29,9 @@ playlist_url = "https://www.youtube.com/playlist?list=PLOsrHd23kLUo"  # the "bra
 playlist_order = "oldest_first"  # this playlist appends new videos at the bottom; "newest_first" otherwise.
                                  # Leave it out to detect the order from the first and last upload dates.
 ytdlp_cmd = "yt-dlp"        # path to yt-dlp; scripts/install-ytdlp.sh puts it at <repo>/.venv/bin/yt-dlp
+pace_seconds = 3            # pause between yt-dlp calls; YouTube answers HTTP 429 to a burst of caption requests
+rate_limit_backoff_seconds = [30, 90]  # after a 429, wait this long and retry; the source stops if it persists
+ytdlp_extra_args = []       # added to every yt-dlp call, e.g. ["--js-runtimes", "node"] when deno is not installed
 
 [sources.instagram]
 enabled = true
