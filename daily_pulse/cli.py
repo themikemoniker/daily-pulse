@@ -12,6 +12,7 @@ import tomllib
 from datetime import date as _date
 from pathlib import Path
 
+from daily_pulse.adapters.registry import register_builtin
 from daily_pulse.config import DEFAULT_CONFIG, ConfigError, load_config
 from daily_pulse.lock import LockError, LockHeld, RunLock
 from daily_pulse.runner import run_pipeline
@@ -44,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, tomllib.TOMLDecodeError, ConfigError) as exc:
         print(f"daily-pulse: cannot load config {args.config}: {exc}", file=sys.stderr)
         return 1
+    register_builtin()
     date = args.date or _date.today().isoformat()
     try:
         if args.dry_run:  # touches nothing on disk, so needs no lock
