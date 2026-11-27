@@ -51,6 +51,7 @@ SUBTITLE_FAILURE = re.compile(r"http error 429|too many requests|unable to downl
 NO_CAPTIONS = "No captions available; rated from metadata only."
 METADATA_ONLY_TAG = "metadata-only"
 
+_DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _CUE_TIME = re.compile(
     r"^(?:(\d+):)?(\d{1,2}):(\d{2})[.,]\d{1,3}\s+-->\s+(?:\d+:)?\d{1,2}:\d{2}[.,]\d{1,3}")
 _TAG = re.compile(r"<[^>]*>")  # <c>, <i>, <c.colorE5E5E5>, inline <00:00:01.500> timestamps
@@ -199,6 +200,8 @@ def _count(value) -> int:
 
 class YouTubeAdapter(SourceAdapter):
     name = "youtube"
+    quality_gate = True  # rules and triage run on the listing, before any per-video yt-dlp call
+    quality_duration = True  # Shorts and clips, and very long streams, are dropped by length
 
     def __init__(self, client=None):
         self._client = client
@@ -213,22 +216,65 @@ class YouTubeAdapter(SourceAdapter):
         return None
 
     def list_new(self, ctx: AdapterContext) -> list[Item]:
-        """Newest first. `playlist_order` says how the playlist is ordered: "newest_first" (the
-        default, as YouTube shows "Watch later" and most saved lists) or "oldest_first" (a plain
-        list new videos are appended to). Private and deleted placeholders are left out."""
+        """Newest first. Entries that carry an upload date are ordered by it. Otherwise
+        `playlist_order` says how the playlist is ordered: "newest_first" (as YouTube shows
+        "Watch later" and most saved lists) or "oldest_first" (a plain list new videos are appended
+        to). When it is unset the order is detected from the upload dates of the first and last
+        entries. Private and deleted placeholders are left out. Duration and view count from the
+        listing go to the quality gate, which runs before any per-video call."""
         self._halted = None
-        order = str(ctx.config.get("playlist_order") or "newest_first")
-        if order not in ("newest_first", "oldest_first"):
+        order = str(ctx.config.get("playlist_order") or "").strip()
+        if order not in ("", "newest_first", "oldest_first"):
             raise ValueError(f"playlist_order must be newest_first or oldest_first, got {order!r}")
-        entries = self._yt(ctx).playlist(str(ctx.config["playlist_url"]).strip())
-        items = [
-            Item(source=self.name, id=e["id"], url=WATCH_URL + e["id"], title=str(e.get("title") or ""),
-                 author=str(e.get("channel") or e.get("uploader") or ""))
-            for e in entries
-            if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
-            and str(e.get("title") or "").strip().lower() not in UNAVAILABLE_TITLES
-        ]
+        client, url = self._yt(ctx), str(ctx.config["playlist_url"]).strip()
+        entries = client.playlist(url)
+        items = [self._listed(e) for e in entries
+                 if isinstance(e, dict) and isinstance(e.get("id"), str) and e["id"]
+                 and str(e.get("title") or "").strip().lower() not in UNAVAILABLE_TITLES]
+        if items and all(i.published for i in items):  # real dates beat any declared order
+            return sorted(items, key=lambda i: i.published, reverse=True)
+        order = order or self._detect_order(client, url, items, ctx)
         return items[::-1] if order == "oldest_first" else items
+
+    def _listed(self, entry: dict) -> Item:
+        metrics = {}
+        for key, field_name in (("duration", "duration"), ("views", "view_count")):
+            value = entry.get(field_name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                metrics[key] = int(value)
+        return Item(source=self.name, id=entry["id"], url=WATCH_URL + entry["id"],
+                    title=str(entry.get("title") or ""),
+                    author=str(entry.get("channel") or entry.get("uploader") or ""),
+                    published=_iso_date(entry.get("upload_date")), metrics=metrics)
+
+    def _detect_order(self, client, url: str, items: list[Item], ctx: AdapterContext) -> str:
+        """The order of a playlist whose config does not say: compare the upload dates of its first
+        and last entries. The answer is remembered per playlist, so it costs two yt-dlp calls once.
+        When the dates cannot tell (fewer than two videos, equal dates, a failed call) it is
+        newest first, as YouTube lists most playlists, and nothing is remembered."""
+        if len(items) < 2:
+            return "newest_first"
+        path = self._state_file(ctx, "youtube-order.json")
+        known = self._load_map(path).get(url)
+        if known in ("newest_first", "oldest_first"):
+            return known
+        try:
+            first, last = (_iso_date(client.info(i.url).get("upload_date")) for i in (items[0], items[-1]))
+        except YtDlpError as exc:
+            log.warning("youtube: cannot detect the playlist order (%s); assuming newest first", exc)
+            return "newest_first"
+        if not (_DATE_ONLY.fullmatch(first) and _DATE_ONLY.fullmatch(last)) or first == last:
+            log.warning("youtube: upload dates of the first and last entries (%r, %r) do not show the "
+                        "playlist order; assuming newest first. Set playlist_order to be sure.", first, last)
+            return "newest_first"
+        order = "oldest_first" if first < last else "newest_first"
+        log.info("youtube: detected playlist order %s (first %s, last %s)", order, first, last)
+        if path is not None:
+            try:
+                atomic_write_json(path, {**self._load_map(path), url: order})
+            except OSError as exc:
+                log.warning("youtube: cannot remember the playlist order: %s", exc)
+        return order
 
     def _captions(self, client, item: Item) -> str:
         """Cleaned captions: manual subtitles if the video has them, else auto captions, else ''."""

@@ -44,6 +44,7 @@ class Screened:
     dropped: list[Decision] = field(default_factory=list)  # to be marked processed, with no note
     allowlisted: set[str] = field(default_factory=set)
     scores: list[Decision] = field(default_factory=list)  # every triage score, kept or dropped
+    remaining: list[Item] = field(default_factory=list)  # not examined (or beyond `limit`): mark seen
 
 
 def _norm(text: str) -> str:
@@ -149,9 +150,13 @@ class QualityGate:
                 return f"duration {seconds}s is over the maximum of {self.config.max_duration_seconds}s"
         return None
 
-    def screen(self, items: list[Item], *, duration_rules: bool, triage: bool, date: str) -> Screened:
+    def screen(self, items: list[Item], *, duration_rules: bool, triage: bool, date: str,
+               limit: int | None = None) -> Screened:
         """Rules first (free), then triage for the survivors when `triage` is true and the gate has
-        a triager. Allowlisted items skip both. Triage only ever drops on a score it really got."""
+        a triager. Allowlisted items skip both. Triage only ever drops on a score it really got.
+        With `limit` (the first-run cap) the survivors are the first `limit` items, in the order
+        given, that pass; triage stops as soon as it has them, and everything else lands in
+        `remaining` (never triaged, to be marked seen by the caller)."""
         out = Screened()
         for item in items:
             if _norm(item.author) in self._allow:
@@ -163,20 +168,49 @@ class QualityGate:
                 out.dropped.append(Decision(item.id, reason))
             else:
                 out.kept.append(item)
-        if triage and self.triager is not None:
-            self._triage(out)
+        triager = self.triager if triage else None
+        pending, out.kept = out.kept, []
+        while pending and (limit is None or len(out.kept) < limit):
+            chunk, count = [], 0
+            while pending and count < BATCH_SIZE:  # one triage call's worth of untrusted items
+                chunk.append(pending.pop(0))
+                count += chunk[-1].id not in out.allowlisted
+            candidates = [i for i in chunk if i.id not in out.allowlisted]
+            scores = triager.triage(candidates) if triager is not None and candidates else {}
+            for item in chunk:
+                decision = scores.get(item.id)
+                if decision is not None:
+                    out.scores.append(decision)
+                if decision is not None and decision.score < DROP_BELOW:
+                    out.dropped.append(decision)
+                else:
+                    out.kept.append(item)
+        if limit is not None:
+            out.kept, extra = out.kept[:limit], out.kept[limit:]
+            out.remaining = extra + pending
         return out
 
-    def _triage(self, out: Screened) -> None:
-        candidates = [i for i in out.kept if i.id not in out.allowlisted]
-        scores = self.triager.triage(candidates) if candidates else {}
-        kept = []
-        for item in out.kept:
-            decision = scores.get(item.id)
-            if decision is not None:
-                out.scores.append(decision)
-            if decision is not None and decision.score < DROP_BELOW:
-                out.dropped.append(decision)
-            else:
-                kept.append(item)
-        out.kept = kept
+
+def decision_records(items: list[Item], screened: Screened, date: str) -> list[dict]:
+    """One log line per decision: rule drops, triage scores (kept or dropped) and allowlisted keeps."""
+    by_id = {i.id: i for i in items}
+    records = []
+    for decision, verdict in ([(d, "dropped") for d in screened.dropped]
+                              + [(d, "kept") for d in screened.scores if d.score >= DROP_BELOW]
+                              + [(Decision(i, "allowlisted channel"), "kept") for i in sorted(screened.allowlisted)]):
+        item = by_id.get(decision.item_id)
+        if item is not None:
+            records.append({"id": item.id, "source": item.source, "title": item.title,
+                            "score": decision.score, "decision": verdict, "reason": decision.reason, "date": date})
+    return records
+
+
+def append_triage_log(path: Path, records: list[dict]) -> None:
+    """Append to the local decision log (`<data_dir>/triage.jsonl`). It stays on this machine: it
+    is private (0600), gitignored with the rest of data/, and nothing in the site build reads it."""
+    if not records:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
+        fh.write("".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in records))
