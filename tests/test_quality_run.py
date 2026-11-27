@@ -203,3 +203,32 @@ def test_github_items_are_never_triaged(fake_claude, monkeypatch, make_env, fixt
     cfg, data, out = make_env()
     assert main(["run", "--config", str(cfg), "--fixtures", str(fixtures_dir), "--out", str(out), "--date", DATE]) == 0
     assert claude.calls == 0
+
+
+def test_the_triage_log_is_local_only_and_never_reaches_the_site(env, tmp_path):
+    from daily_pulse.site import build_site
+    e = env([triage_reply(0, 0, 3, 3), rating_reply()])
+    e.go(FakeYtDlp(PLAYLIST, subs=SUBS, meta=titled(PLAYLIST)))
+    log = e.data / "triage.jsonl"
+    assert log.is_file() and "triage reason 0" in log.read_text()
+    # even when a stray copy sits where the builder reads from, nothing of it is published
+    (e.out / "triage.jsonl").write_text(log.read_text())
+    (e.out / "notes" / DATE / "triage.jsonl").write_text(log.read_text())
+    (e.out / "digests").mkdir()
+    (e.out / "digests" / "triage.jsonl").write_text(log.read_text())
+    site = tmp_path / "site"
+    build_site(e.out, site, DATE)
+    published = [p for p in site.rglob("*") if p.is_file()]
+    assert published and not [p for p in published if "triage" in p.name]
+    assert not [p for p in published if "triage reason" in p.read_text(errors="ignore")]
+    assert not [p for p in published if TITLES["rice"] in p.read_text(errors="ignore")]  # triaged-out titles too
+
+
+def test_the_triage_log_is_gitignored():
+    import shutil
+    import subprocess
+    if shutil.which("git") is None:
+        pytest.skip("git not installed")
+    root = Path(__file__).parent.parent
+    proc = subprocess.run(["git", "check-ignore", "-q", "data/triage.jsonl"], cwd=root)
+    assert proc.returncode == 0
