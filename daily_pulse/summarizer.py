@@ -11,7 +11,7 @@ import logging
 import re
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from daily_pulse.models import VERDICTS, Beat, Item, Rating
@@ -20,6 +20,8 @@ log = logging.getLogger("daily_pulse")
 
 DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 VIDEO_SOURCES = ("youtube",)
+DEFAULT_MAX_CALLS = 30
+DEFAULT_TIMEOUT = 300.0  # seconds per call
 ATTEMPTS = 2  # the first call plus one retry
 
 _TIMESTAMP = re.compile(r"[0-9]{1,2}(:[0-9]{2}){1,2}")
@@ -91,10 +93,19 @@ def parse_reply(text: str, item: Item) -> Rating:
     )
 
 
+class CallFailed(Exception):
+    """The claude process failed, timed out or could not be started."""
+
+
 @dataclass
 class Summarizer:
+    """One per run: `max_calls` bounds the `claude -p` calls (retries included) it will make."""
+
     claude_cmd: str = "claude"
+    max_calls: int = DEFAULT_MAX_CALLS
+    timeout: float = DEFAULT_TIMEOUT
     prompts_dir: Path = DEFAULT_PROMPTS_DIR
+    calls_made: int = field(default=0, init=False)
 
     def _prompt(self, item: Item, transcript: str) -> str:
         rubric = (Path(self.prompts_dir) / "rubric.md").read_text(encoding="utf-8")
@@ -105,18 +116,34 @@ class Summarizer:
         return rubric.rstrip() + "\n\n" + template.replace("{{ITEM}}", body)
 
     def _call(self, prompt: str) -> str:
-        proc = subprocess.run([*shlex.split(self.claude_cmd), "-p"], input=prompt, text=True,
-                              capture_output=True, check=True)
+        self.calls_made += 1
+        try:
+            proc = subprocess.run([*shlex.split(self.claude_cmd), "-p"], input=prompt, text=True,
+                                  capture_output=True, timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            raise CallFailed(f"timed out after {self.timeout}s") from None
+        except (OSError, ValueError) as exc:  # not found, not executable, bad command string
+            raise CallFailed(f"cannot run {self.claude_cmd!r}: {exc}") from None
+        if proc.returncode != 0:
+            raise CallFailed(f"exit {proc.returncode}: {proc.stderr.strip()[:200]}")
         return proc.stdout
 
     def rate(self, item: Item, transcript: str = "") -> Rating | None:
-        """The item's rating, or None (logged) when claude never gave a valid one."""
+        """The item's rating, or None (logged) when it could not be rated: claude never gave a
+        valid reply, the process failed, or the per-run call cap was reached. Never raises."""
         label = f"{item.source}-{item.id}"
-        prompt = self._prompt(item, transcript)
+        try:
+            prompt = self._prompt(item, transcript)
+        except OSError as exc:
+            log.error("%s: left unrated, cannot read prompts: %s", label, exc)
+            return None
         for attempt in range(1, ATTEMPTS + 1):
+            if self.calls_made >= self.max_calls:
+                log.warning("%s: left unrated, call cap of %d reached", label, self.max_calls)
+                return None
             try:
                 return parse_reply(self._call(prompt), item)
-            except BadReply as exc:
-                log.warning("%s: attempt %d/%d gave an invalid rating: %s", label, attempt, ATTEMPTS, exc)
+            except (BadReply, CallFailed) as exc:
+                log.warning("%s: attempt %d/%d failed: %s", label, attempt, ATTEMPTS, exc)
         log.warning("%s: left unrated", label)
         return None

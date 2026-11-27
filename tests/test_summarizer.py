@@ -166,3 +166,60 @@ def test_a_non_video_item_needs_a_summary_but_a_video_does_not(fake_claude):
     claude = fake_claude(good(summary=""))
     video = repo_item(source="youtube", id="v", title="t")
     assert Summarizer(claude_cmd=str(claude.path)).rate(video) is not None
+
+
+def test_the_call_cap_is_enforced_across_items(fake_claude, caplog):
+    claude = fake_claude(good())
+    s = Summarizer(claude_cmd=str(claude.path), max_calls=3)
+    ratings = [s.rate(repo_item(id=f"r{i}")) for i in range(5)]
+    assert [r is not None for r in ratings] == [True, True, True, False, False]
+    assert claude.calls == 3
+    assert s.calls_made == 3
+
+
+def test_retries_count_against_the_cap(fake_claude):
+    claude = fake_claude("bad", good())
+    s = Summarizer(claude_cmd=str(claude.path), max_calls=1)
+    assert s.rate(repo_item()) is None  # the retry would be call 2
+    assert claude.calls == 1
+    assert s.rate(repo_item(id="other")) is None
+    assert claude.calls == 1
+
+
+def test_a_zero_cap_makes_no_calls(fake_claude):
+    claude = fake_claude(good())
+    assert Summarizer(claude_cmd=str(claude.path), max_calls=0).rate(repo_item()) is None
+    assert claude.calls == 0
+
+
+def test_default_cap_is_30(fake_claude):
+    claude = fake_claude(good())
+    s = Summarizer(claude_cmd=str(claude.path))
+    assert s.max_calls == 30
+    for i in range(32):
+        s.rate(repo_item(id=f"r{i}"))
+    assert claude.calls == 30
+
+
+def test_a_failing_process_leaves_the_item_unrated_without_raising(fake_claude, caplog):
+    claude = fake_claude({"exit": 1}, good())
+    with caplog.at_level("WARNING", logger="daily_pulse"):
+        rating = Summarizer(claude_cmd=str(claude.path)).rate(repo_item())
+    assert rating.rating == 8  # the retry worked
+    claude = fake_claude({"exit": 1})
+    assert Summarizer(claude_cmd=str(claude.path)).rate(repo_item()) is None
+
+
+def test_a_missing_binary_leaves_the_item_unrated(tmp_path, caplog):
+    s = Summarizer(claude_cmd=str(tmp_path / "no-such-claude"))
+    with caplog.at_level("WARNING", logger="daily_pulse"):
+        assert s.rate(repo_item()) is None
+    assert "github-acme-checker" in caplog.text
+
+
+def test_a_hung_process_times_out_as_unrated(tmp_path):
+    script = tmp_path / "slow"
+    script.write_text("#!/bin/sh\nsleep 5\n")
+    script.chmod(0o755)
+    s = Summarizer(claude_cmd=str(script), timeout=0.2, max_calls=2)
+    assert s.rate(repo_item()) is None
