@@ -170,7 +170,7 @@ def _run(args, config, date: str) -> int:
     logger.setLevel(logging.INFO)
     logger.addHandler(handler)
     try:
-        result = run_pipeline(config, date, args.fixtures)
+        result = run_pipeline(config, date, args.fixtures, out_dir=args.out)
     finally:
         logger.removeHandler(handler)
         handler.close()

@@ -15,6 +15,18 @@ class AdapterContext:
     date: str = ""  # run date, YYYY-MM-DD
     data_dir: Path | None = None  # local-only state dir; adapters keep private state under it
     persist: bool = True  # False on --dry-run: adapters must not write anything
+    notes_dir: Path | None = None  # where per-item notes are written (<out>/notes); None: write none
+    summarizer: object | None = None  # a daily_pulse.summarizer.Summarizer shared by the whole run
+
+
+class ItemSkipped(Exception):
+    """Raised by `fetch_details` for an item that can never be processed (or has failed too
+    often): the runner marks it processed and carries on, with no error and no item."""
+
+
+class ItemDeferred(Exception):
+    """Raised by `fetch_details` when an item is not ready yet (not an error): the runner leaves
+    it unprocessed, so the next run looks at it again, and reports nothing as failed."""
 
 
 class SourceAdapter(ABC):
