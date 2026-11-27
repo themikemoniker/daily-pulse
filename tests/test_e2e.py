@@ -310,7 +310,9 @@ def test_a_github_item_rated_9_and_under_48_hours_old_is_a_diamond(pipeline):
     assert "iamond" in digest
     diamonds = digest.split("iamond", 1)[1].split("\n## ", 1)[0]
     assert "other/gizmo" in diamonds  # created a day before the run
-    assert "newrepo/agent-evals" not in diamonds  # rated 7, and three days old
+    # Rated 7 and three days old, but growing at 100 stars a day: a diamond by the GitHub rule
+    # (rating 7+ and 50+ stars a day), which applies whatever the age.
+    assert "newrepo/agent-evals" in diamonds
 
 
 def test_no_item_is_marked_processed_without_a_note_or_a_logged_drop(pipeline, caplog):

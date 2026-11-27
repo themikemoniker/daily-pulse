@@ -55,6 +55,12 @@ handles = [
 [sources.github]
 enabled = true
 rising_days = 7
+rising_topics = ["agent", "llm", "mcp", "claude-code", "ai-agent"]  # one search per topic; [] = one search for everything
+rising_per_page = 30        # results per topic search (the rating pool is the 20 fastest growers + 5 best topic matches)
+min_stars = 5               # a rising repo needs at least this many stars to be considered
+rising_top = 10             # at most this many new rising repos are rated and noted per run
+min_relevance = 4           # a rising repo the batch rating scores below this is dropped (logged), not noted
+readme_excerpt = false      # true: send each new rising repo's first 400 README characters to the rater (needs GITHUB_TOKEN; never stored)
 watch_accounts = [
   "karpathy", "mattpocock", "can1357", "simonw", "hamelsmu", "shreyashankar",
   "jxnl", "eugeneyan", "hwchase17", "anthropics", "langchain-ai",

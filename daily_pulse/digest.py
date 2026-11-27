@@ -18,6 +18,10 @@ from daily_pulse.notes import _write_atomic
 DEFAULT_MIN_RATING = 5  # the shipped `[quality] min_rating`
 DIAMOND_MIN_RATING = 9
 DIAMOND_MAX_AGE = timedelta(hours=48)  # strictly younger than this
+# A GitHub repo is also a diamond when it is relevant and growing fast, whatever its age: rating 7+
+# and 50+ stars a day (ported from the working digest script's `is_diamond`).
+GITHUB_DIAMOND_MIN_RATING = 7
+GITHUB_DIAMOND_MIN_VELOCITY = 50
 
 # Anchored on the "## Rating" heading: free text (summary, title) is one line, so it can never
 # start a line of its own and forge this section.
@@ -36,6 +40,7 @@ class Entry:
     reason: str
     verdict: str
     tags: list[str]
+    star_velocity: float | None = None  # GitHub notes only: stars per day
 
 
 @dataclass
@@ -75,6 +80,7 @@ def _parse_note(path: Path) -> Entry | None:
     if verdict is None:
         m = re.search(r"^## Verdict\n\n(\S+)", body, re.M)
         verdict = m.group(1) if m else ""
+    velocity = front.get("star_velocity")
     return Entry(
         source=path.stem.split("-", 1)[0],
         stem=path.stem,
@@ -86,6 +92,7 @@ def _parse_note(path: Path) -> Entry | None:
         reason=reason.group(1),
         verdict=verdict,
         tags=[str(t) for t in front.get("tags", [])],
+        star_velocity=velocity if isinstance(velocity, (int, float)) and not isinstance(velocity, bool) else None,
     )
 
 
@@ -128,7 +135,11 @@ def _default_now(date: str) -> datetime:
 
 def is_diamond(entry: Entry, now: datetime) -> bool:
     """High signal (rating 9+) and early (published less than 48 hours before `now`).
-    An item with no usable publish time cannot be shown to be early, so it is never one."""
+    An item with no usable publish time cannot be shown to be early, so it is never one. A GitHub
+    repo is also a diamond at rating 7+ with 50+ stars a day (never one the verdict says to skip)."""
+    if (entry.source == "github" and entry.star_velocity is not None and entry.verdict != "skip"
+            and entry.rating >= GITHUB_DIAMOND_MIN_RATING and entry.star_velocity >= GITHUB_DIAMOND_MIN_VELOCITY):
+        return True
     if entry.published is None or entry.rating < DIAMOND_MIN_RATING:
         return False
     return now - entry.published < DIAMOND_MAX_AGE

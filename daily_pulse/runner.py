@@ -107,12 +107,22 @@ def _run_adapter(name, adapter, ctx, state, first_run_cap, items: list, gate=Non
     except Exception as exc:  # noqa: BLE001 - isolation is the point
         log.error("%s: listing failed\n%s", name, traceback.format_exc())
         return exc
+    if dropped is None:
+        dropped = []
+    try:
+        new, weeded = adapter.rank_new(new, ctx)
+    except Exception:  # noqa: BLE001 - fail open: the items carry on in their listed order
+        log.error("%s: ranking the new items failed, carrying on unranked\n%s", name, traceback.format_exc())
+        weeded = []
+    for item, reason in weeded:
+        log.info("%s: %s dropped (relevance): %s", name, item.id, reason)
+        dropped.append({"id": item.id, "title": item.title, "score": None, "reason": reason})
+    state.mark_processed(name, *(item.id for item, _ in weeded))
     first_run = state.is_first_run(name)
     if adapter.quality_gate and gate is not None:
         # Screened items are dropped before the first-run cap, so the cap takes the newest
         # items that pass, and triage stops once it has found enough of them.
-        new = _screen(name, adapter, ctx, state, gate, new, first_run_cap if first_run else None,
-                      dropped if dropped is not None else [])
+        new = _screen(name, adapter, ctx, state, gate, new, first_run_cap if first_run else None, dropped)
     elif first_run:
         # Don't chew through a backlog: keep the newest few, and mark the rest as seen
         # (in one write) so later runs only handle genuinely new items.

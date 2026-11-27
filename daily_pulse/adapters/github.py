@@ -1,10 +1,12 @@
 """GitHub source: rising repos plus watched accounts, via the REST API."""
 from __future__ import annotations
 
+import base64
 import fnmatch
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -14,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from daily_pulse.adapters.base import AdapterContext, SourceAdapter
 from daily_pulse.models import Item
+from daily_pulse.repo_rating import rate_repos_batch, topic_score, velocity_of
 from daily_pulse.state import atomic_write_json
 
 log = logging.getLogger("daily_pulse")
@@ -23,6 +26,11 @@ log = logging.getLogger("daily_pulse")
 # last, bare pushes. Within a kind, newest first.
 KIND_ORDER = ("release", "repo", "rising", "tag", "stars", "push")
 DEFAULT_PUSH_MIN_STARS = 25  # a bare push (no release or tag) is news only for a repo this popular
+RISING_DEFAULTS = {"rising_topics": [], "rising_per_page": 30, "min_stars": 5, "rising_top": 10,
+                   "min_relevance": 4, "readme_excerpt": False}
+POOL_BY_VELOCITY, POOL_BY_TOPIC = 20, 5  # the rating pool: fastest growers plus strongest topic matches
+README_EXCERPT_CHARS = 400
+TOPIC_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,49}")
 
 API = "https://api.github.com"
 EXCERPT_CHARS = 400
@@ -98,6 +106,8 @@ class GitHubAdapter(SourceAdapter):
         self._errors: list = []
         self._stars: dict = {}
         self._push_min_stars, self._ignore = DEFAULT_PUSH_MIN_STARS, []  # set per run by list_new
+        self._rising_cfg = dict(RISING_DEFAULTS)
+        self._pool_raw: dict = {}
         self.last_run: dict = {"degraded": False, "reason": ""}
 
     def _now(self, ctx: AdapterContext) -> datetime:
@@ -152,6 +162,7 @@ class GitHubAdapter(SourceAdapter):
         self.last_run = {"degraded": False, "reason": ""}
         self._stars = self._load_stars(ctx)
         self._push_min_stars, self._ignore = self._noise_settings(cfg)
+        self._rising_cfg = self._rising_settings(cfg)
         items: list[Item] = []
         # Watched repos first: they are explicitly required and cheap (one call each), so a
         # tight rate limit must not starve them behind the larger account listings.
@@ -190,8 +201,31 @@ class GitHubAdapter(SourceAdapter):
             log.warning("github: degraded: %s", reason)
             self.last_run = {"degraded": True, "reason": reason}
         items.sort(key=lambda i: i.published, reverse=True)
-        items.sort(key=self._kind_rank)  # stable: newest first inside each kind
+        # Stable: by kind, then (rising repos only, the only ones with a relevance) most relevant
+        # first, then newest first.
+        items.sort(key=lambda i: (self._kind_rank(i), -(i.metrics.get("relevance") or 0)))
         return items
+
+    @staticmethod
+    def _rising_settings(cfg: dict) -> dict:
+        out = {k: cfg.get(k, v) for k, v in RISING_DEFAULTS.items()}
+
+        def whole(key, low, high):
+            v = out[key]
+            if isinstance(v, bool) or not isinstance(v, int) or not low <= v <= high:
+                raise ValueError(f"[sources.github] {key} must be a whole number from {low} to {high}, got {v!r}")
+
+        whole("rising_per_page", 1, 100)
+        whole("min_stars", 0, 1_000_000)
+        whole("rising_top", 1, 100)
+        whole("min_relevance", 1, 10)
+        topics = out["rising_topics"]
+        if (not isinstance(topics, list) or not all(isinstance(t, str) and TOPIC_NAME.fullmatch(t) for t in topics)):
+            raise ValueError(f"[sources.github] rising_topics must be a list of GitHub topic names "
+                             f"(lowercase letters, digits, hyphens), got {topics!r}")
+        if not isinstance(out["readme_excerpt"], bool):
+            raise ValueError(f"[sources.github] readme_excerpt must be true or false, got {out['readme_excerpt']!r}")
+        return out
 
     @staticmethod
     def _kind_rank(item: Item) -> int:
@@ -252,13 +286,94 @@ class GitHubAdapter(SourceAdapter):
         )
 
     def _rising(self, ctx, now, days) -> list[Item]:
+        """Rising repos: one search per configured topic (GitHub ANDs several `topic:` qualifiers, so
+        separate queries are the only way to OR them), pooled as the fastest growers plus the strongest
+        topic matches. The relevance rating of the new ones happens in `rank_new`."""
+        cfg = self._rising_cfg
         since = (now - timedelta(days=days)).date().isoformat()
-        status, body = self._get(ctx, "/search/repositories", {
-            "q": f"created:>{since}", "sort": "stars", "order": "desc", "per_page": 10})
-        if status != 200 or not isinstance(body, dict) or not isinstance(body.get("items"), list):
-            return []
-        return [self._repo_item("rising", r, now, r["created_at"]) for r in body["items"]
-                if not self._ignored(str(r.get("full_name", "")))]
+        queries = [f"created:>{since} topic:{t}" for t in cfg["rising_topics"]] or [f"created:>{since}"]
+        by_name: dict = {}
+        for q in queries:
+            try:
+                status, body = self._get(ctx, "/search/repositories", {
+                    "q": q, "sort": "stars", "order": "desc", "per_page": cfg["rising_per_page"]})
+            except RateLimited as exc:  # keep what the earlier topics found
+                log.warning("github: degraded, rising search stopped early: %s", exc)
+                self.last_run = {"degraded": True, "reason": str(exc)}
+                break
+            if status != 200 or not isinstance(body, dict) or not isinstance(body.get("items"), list):
+                continue
+            for r in body["items"]:
+                if isinstance(r, dict) and r.get("full_name") and r.get("html_url") and r.get("created_at"):
+                    by_name.setdefault(r["full_name"], r)
+        repos = [r for r in by_name.values() if not r.get("fork") and not self._ignored(r["full_name"])
+                 and r.get("stargazers_count", 0) >= cfg["min_stars"]]
+        by_vel = sorted(repos, key=velocity_of, reverse=True)
+        by_topic = sorted(repos, key=topic_score, reverse=True)
+        pool, seen = [], set()
+        for r in by_vel[:POOL_BY_VELOCITY] + by_topic[:POOL_BY_TOPIC]:
+            if r["full_name"] not in seen:
+                seen.add(r["full_name"])
+                pool.append(r)
+        self._pool_raw = {r["full_name"]: r for r in pool}  # the raw repos, for rank_new's rating prompt
+        pool.sort(key=lambda r: (-topic_score(r), -velocity_of(r)))
+        return [self._repo_item("rising", r, now, r["created_at"]) for r in pool]
+
+    def rank_new(self, items, ctx):
+        """Rate the NEW rising repos for relevance in ONE call (`repo_rating.rate_repos_batch`, the
+        working script's logic), so a day with nothing new spends no call. Rated repos are ordered by
+        relevance, then topic match, then velocity, and at most `rising_top` are carried on. A repo
+        rated below `min_relevance` is weeded out (the runner logs it and marks it processed, which
+        also saves its per-item call). A repo that could not be rated (no summarizer, the call cap, a
+        failed call, a dry run) is left UNRATED, never given a guessed score: it carries on to the
+        per-item rating, which retries it on a later run if that fails too."""
+        cfg = self._rising_cfg
+        rising = [i for i in items if i.id.startswith("rising:")]
+        if not rising:
+            return items, []
+        raws = [dict(self._pool_raw.get(i.title) or self._raw_from_item(i)) for i in rising]
+        if cfg["readme_excerpt"] and os.environ.get(UrllibTransport.TOKEN_ENV, "").strip():
+            for r in raws:
+                r["_readme_excerpt"] = self._readme_excerpt(ctx, r["full_name"])
+        # No batch rating on a dry run: nothing would be kept, and the calls are not free.
+        ratings = rate_repos_batch(raws, ctx.summarizer) if ctx.persist else {}
+        weeded, scored = [], []
+        for item, raw in zip(rising, raws):
+            rated = ratings.get(item.title)
+            if rated is not None and rated["rating"] < cfg["min_relevance"]:
+                weeded.append((item, f"relevance {rated['rating']:g}, below {cfg['min_relevance']}: "
+                                     f"{rated['reason'][:120]}"))
+                continue
+            if rated is not None:
+                item.metrics["relevance"] = rated["rating"]
+                item.metrics["relevance_reason"] = rated["reason"][:200]
+            scored.append((rated is None, -(rated["rating"] if rated else 0),
+                           -topic_score(raw), -velocity_of(raw), item))
+        scored.sort(key=lambda t: t[:4])  # rated first by relevance, then topic match, then velocity
+        kept = [t[4] for t in scored[:cfg["rising_top"]]]
+        out = [i for i in items if not i.id.startswith("rising:")] + kept
+        out.sort(key=lambda i: (self._kind_rank(i), -(i.metrics.get("relevance") or 0)))
+        return out, weeded
+
+    @staticmethod
+    def _raw_from_item(item) -> dict:
+        """A repo dict rebuilt from a rising item, for when the run listed it in an earlier call."""
+        m = item.metrics or {}
+        return {"full_name": item.title, "language": m.get("language"), "stargazers_count": m.get("stars", 0),
+                "description": item.text, "topics": [], "created_at": item.published}
+
+    def _readme_excerpt(self, ctx, full_name: str) -> str:
+        """The first ~400 characters of the README, for the rating prompt only (never stored in a
+        note). Opt-in (`readme_excerpt`) and only with a token: one extra call per repo is too much
+        for the unauthenticated budget."""
+        try:
+            status, body = self._get(ctx, f"/repos/{full_name}/readme")
+            if status != 200 or not isinstance(body, dict):
+                return ""
+            raw = base64.b64decode(body.get("content", "")).decode("utf-8", "replace")
+            return re.sub(r"\s+", " ", raw).strip()[:README_EXCERPT_CHARS]
+        except (RateLimited, ValueError, TypeError):
+            return ""
 
     # -- watched accounts ----------------------------------------------------------------
 

@@ -46,6 +46,14 @@ class SourceAdapter(ABC):
         fields. Used only for rating and the quote guard; it is never stored. Default: none."""
         return ""
 
+    def rank_new(self, items: list[Item], ctx: AdapterContext) -> tuple[list[Item], list[tuple[Item, str]]]:
+        """Called by the runner on the NEW items only (already-processed ones are gone), before the
+        quality gate and the first-run cap. Returns (the items to carry on with, in the order to take
+        them, and [(item, reason)] for items weeded out for good: the runner logs them, lists them as
+        dropped and marks them processed, so nothing is consumed silently). An item in neither list
+        simply waits for a later run. Default: nothing changes."""
+        return items, []
+
     @abstractmethod
     def list_new(self, ctx: AdapterContext) -> list[Item]:
         """Candidate items, newest first. The runner drops ones already processed."""
