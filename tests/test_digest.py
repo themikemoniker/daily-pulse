@@ -1,6 +1,7 @@
 """Digest builder tests. Notes are produced by the real note writer, so the digest is tested
 against the actual note format; nothing here touches the network or a subprocess."""
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 
 from daily_pulse.digest import build_digest
 from daily_pulse.models import Item, Rating
@@ -187,3 +188,89 @@ def test_a_day_with_no_notes_still_builds_a_page(tmp_path):
 
     assert "No items today." in d.markdown
     assert "No items today." in d.html
+
+
+class Page(HTMLParser):
+    """Every tag and attribute in a page, for asserting what the HTML may contain."""
+
+    def __init__(self, text):
+        super().__init__()
+        self.tags, self.attrs = [], []  # attrs: (tag, name, value)
+        self.feed(text)
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append(tag)
+        self.attrs += [(tag, k, v) for k, v in attrs]
+
+    def values(self, name):
+        return [v for _, k, v in self.attrs if k == name]
+
+
+def full_digest(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "v1", "A video", 9, source="youtube", url="https://youtu.be/v1")
+    add_note(notes, "r1", "A repo", 5, url="https://github.com/o/r")
+    return digest(notes, {"youtube": {"status": "ok", "items": [{}]}, "x": {"status": "deferred: none", "items": []}})
+
+
+def test_html_is_email_ready_with_no_external_resources(tmp_path):
+    page = Page(full_digest(tmp_path).html)
+
+    assert not {"link", "script", "style", "img", "iframe", "form", "object", "embed"} & set(page.tags)
+    assert not page.values("src") and not page.values("srcset")
+    assert "table" in page.tags
+    assert all("url(" not in v and "@import" not in v for v in page.values("style"))
+    assert page.values("style"), "styles must be inline"
+
+
+def test_html_is_a_complete_standalone_document(tmp_path):
+    text = full_digest(tmp_path).html
+
+    assert text.lstrip().lower().startswith("<!doctype html>")
+    page = Page(text)
+    assert {"html", "head", "body", "title"} <= set(page.tags)
+    assert "2026-01-15" in text
+
+
+def test_every_link_is_an_item_url_or_built_from_the_base_url(tmp_path):
+    page = Page(full_digest(tmp_path).html)
+
+    hrefs = page.values("href")
+    assert "https://youtu.be/v1" in hrefs and "https://github.com/o/r" in hrefs
+    for href in hrefs:
+        assert href in ("https://youtu.be/v1", "https://github.com/o/r") or href.startswith(BASE), href
+    assert f"{BASE}notes/{DATE}/youtube-v1.md" in hrefs
+    assert f"{BASE}archive/" in hrefs
+
+
+def test_base_url_is_normalised_and_optional(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "r1", "A repo", 5, url="https://github.com/o/r")
+
+    no_slash = Page(digest(notes, base_url="https://example.test/pulse").html).values("href")
+    assert f"https://example.test/pulse/notes/{DATE}/github-r1.md" in no_slash
+
+    none = Page(digest(notes, base_url="").html).values("href")
+    assert none == ["https://github.com/o/r"]  # nothing relative is invented
+
+
+def test_titles_are_escaped_and_unsafe_urls_are_not_linked(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "evil", "<script>alert(1)</script> & <b>bold</b>", 5, url="javascript:alert(1)")
+
+    d = digest(notes)
+
+    page = Page(d.html)
+    assert "script" not in page.tags and "b" not in page.tags
+    assert "&lt;script&gt;" in d.html
+    assert not any(h.lower().startswith("javascript:") for h in page.values("href"))
+    assert "javascript:" not in d.markdown
+
+
+def test_markdown_link_text_survives_brackets_in_titles(tmp_path):
+    notes = tmp_path / "notes"
+    add_note(notes, "b", "Why [evals] (still) matter", 5, url="https://items.test/a_(b)")
+
+    line = next(l for l in digest(notes).markdown.splitlines() if l.startswith("1. "))
+
+    assert "[Why \\[evals\\] (still) matter](https://items.test/a_%28b%29)" in line
