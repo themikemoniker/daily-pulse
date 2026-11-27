@@ -220,10 +220,20 @@ class XAdapter(SourceAdapter):
         items: dict[str, Item] = {}
         try:
             for name in s["usernames"][: s["max_accounts"]]:
-                uid = self._user_id(transport, name, cache)
-                if uid is None:
-                    continue
-                tweets, included, users = self._timeline(transport, uid, s)
+                try:
+                    uid = self._user_id(transport, name, cache)
+                    if uid is None:
+                        continue
+                    tweets, included, users = self._timeline(transport, uid, s)
+                except XStopped as exc:
+                    if not items:
+                        raise  # nothing to show for it: fail the module, loudly
+                    # The posts already read were billed: keep them. The accounts not reached wait for
+                    # a later run (the lookback window may miss some, which the log says).
+                    log.warning("x: stopped early with %d post(s) kept: %s", len(items), exc)
+                    self.last_run["degraded"] = True
+                    self.last_run["reason"] = str(exc)
+                    break
                 for tw in tweets:
                     item = self._item(name, tw, included, users)
                     items.setdefault(item.id, item)

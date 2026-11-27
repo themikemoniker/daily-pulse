@@ -298,6 +298,17 @@ def test_payment_or_rate_limit_stops_only_the_x_module(make_env, fixtures_dir, c
     assert "demo_beta" not in log  # the second account was never requested
 
 
+def test_a_stop_after_some_posts_keeps_them_and_marks_the_run_degraded(fixtures_dir, caplog):
+    set_response(fixtures_dir, "/users/1002/tweets", 429, {"title": "slow down"})
+    adapter = XAdapter()
+    with caplog.at_level("WARNING"):
+        items = adapter.list_new(ctx({"paid_api_approved": True, "usernames": ["demo_alpha", "demo_beta"]},
+                                     fixtures_dir))
+    assert items and {i.author for i in items} == {"demo_alpha"}  # the posts already read are kept
+    assert adapter.last_run["degraded"] is True and "429" in adapter.last_run["reason"]
+    assert "stopped early" in caplog.text
+
+
 def test_stop_raises_xstopped_for_402():
     def transport(path, params):
         return (200, {"data": {"id": "1"}}) if "by/username" in path else (402, {})

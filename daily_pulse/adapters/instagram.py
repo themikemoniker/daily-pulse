@@ -109,6 +109,7 @@ class InstagramAdapter(SourceAdapter):
         return proc.stdout
 
     def list_new(self, ctx: AdapterContext) -> list[Item]:
+        self._limit(ctx)  # validate up front, even for an empty listing
         kinds = [k for k in ctx.config.get("kinds", KINDS) if k in KINDS] or list(KINDS)
         entries = [e for e in parse_entries(self._read(ctx)) if e["source"] in kinds]
         entries.sort(key=lambda e: kinds.index(e["source"]))  # stable: saved first, then liked
@@ -125,14 +126,23 @@ class InstagramAdapter(SourceAdapter):
                 if _count(e.get(field)) is not None:  # optional: a malformed value is just left out
                     metrics[key] = e[field]
             tags = e.get("hashtags")
-            if isinstance(tags, list) and all(isinstance(t, str) for t in tags) and tags:
-                metrics["hashtags"] = [t.strip().lstrip("#")[:40] for t in tags[:MAX_HASHTAGS] if t.strip()]
+            if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
+                cleaned = [t.strip().lstrip("#").strip()[:40] for t in tags]
+                cleaned = [t for t in cleaned if t][:MAX_HASHTAGS]
+                if cleaned:
+                    metrics["hashtags"] = cleaned
             items.append(Item(source=self.name, id=code, url=e["url"],
                               title=title_from(e.get("caption") or "", author, code), author=author,
                               published=e.get("timestamp") or "", metrics=metrics))
-            if len(items) >= self._limit(ctx):
-                break
         return items
+
+    def rank_new(self, items, ctx):
+        """The per-run `limit` applies to NEW reels (saved first, as listed), so reels already
+        processed never use up the window. The rest wait for a later run."""
+        limit = self._limit(ctx)
+        if len(items) > limit:
+            log.info("instagram: %d new reel(s) beyond limit=%d wait for a later run", len(items) - limit, limit)
+        return items[:limit], []
 
     @staticmethod
     def _limit(ctx: AdapterContext) -> int:

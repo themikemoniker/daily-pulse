@@ -183,3 +183,39 @@ NOW = datetime(2026, 1, 15, tzinfo=timezone.utc)
 ])
 def test_the_github_diamond_rule_sits_beside_the_rating_9_and_under_48h_rule(e, expected):
     assert is_diamond(e, NOW) is expected
+
+
+def test_the_rating_pool_is_chosen_from_new_repos_so_old_ones_never_crowd_them_out():
+    # 30 new repos, the 25-slot pool takes the 20 fastest and the 5 best topic matches.
+    adapter, items = new_rising([(f"o/r{i}", 100 + i) for i in range(30)])
+    s = FakeSummarizer("{}")
+    kept, weeded = adapter.rank_new(items, ctx(s))
+    prompt = s.prompts[0]
+    import re
+
+    assert sum(bool(re.match(r"\d+\. o/r", line)) for line in prompt.splitlines()) == 25  # 20 fastest + 5 topical
+    assert len(kept) <= 10 and weeded == []  # rising_top; the others wait, unprocessed
+
+
+def test_a_slow_but_topical_new_repo_still_reaches_the_rater():
+    names = [(f"o/fast{i}", 5000 + i) for i in range(25)] + [("o/eval-harness", 6)]
+    adapter, items = new_rising(names)
+    s = FakeSummarizer("{}")
+    adapter.rank_new(items, ctx(s))
+    assert "o/eval-harness" in s.prompts[0]  # the top-5 topic matches join the 20 fastest growers
+
+
+def test_star_velocity_is_written_only_for_new_repo_notes():
+    from daily_pulse.models import Item
+    from daily_pulse.notes import render_note
+    from daily_pulse.summarizer import Rating
+
+    def note(item_id):
+        item = Item(source="github", id=item_id, url="https://github.com/a/b", title="a/b", author="a",
+                    published="2026-01-14T00:00:00Z", text="d", metrics={"star_velocity": 77.0})
+        rating = Rating(summary="s", takeaways=[], beats=[], rating=7, reason="r", verdict="skim", tags=[],
+                        diamond=False, diamond_reason="", quotes=[])
+        return render_note(item, rating, "2026-01-15")
+
+    assert "star_velocity: 77.0" in note("rising:a/b") and "star_velocity: 77.0" in note("repo:a/b")
+    assert "star_velocity" not in note("release:a/b:v1") and "star_velocity" not in note("push:a/b:2026-01-14")

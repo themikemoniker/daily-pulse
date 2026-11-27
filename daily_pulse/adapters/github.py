@@ -308,16 +308,9 @@ class GitHubAdapter(SourceAdapter):
                     by_name.setdefault(r["full_name"], r)
         repos = [r for r in by_name.values() if not r.get("fork") and not self._ignored(r["full_name"])
                  and r.get("stargazers_count", 0) >= cfg["min_stars"]]
-        by_vel = sorted(repos, key=velocity_of, reverse=True)
-        by_topic = sorted(repos, key=topic_score, reverse=True)
-        pool, seen = [], set()
-        for r in by_vel[:POOL_BY_VELOCITY] + by_topic[:POOL_BY_TOPIC]:
-            if r["full_name"] not in seen:
-                seen.add(r["full_name"])
-                pool.append(r)
-        self._pool_raw = {r["full_name"]: r for r in pool}  # the raw repos, for rank_new's rating prompt
-        pool.sort(key=lambda r: (-topic_score(r), -velocity_of(r)))
-        return [self._repo_item("rising", r, now, r["created_at"]) for r in pool]
+        self._pool_raw = {r["full_name"]: r for r in repos}  # the raw repos, for rank_new's rating prompt
+        repos.sort(key=lambda r: (-topic_score(r), -velocity_of(r)))
+        return [self._repo_item("rising", r, now, r["created_at"]) for r in repos]
 
     def rank_new(self, items, ctx):
         """Rate the NEW rising repos for relevance in ONE call (`repo_rating.rate_repos_batch`, the
@@ -332,6 +325,22 @@ class GitHubAdapter(SourceAdapter):
         if not rising:
             return items, []
         raws = [dict(self._pool_raw.get(i.title) or self._raw_from_item(i)) for i in rising]
+        # The rating pool is chosen from the NEW repos only (repos noted on earlier days are gone by
+        # now), so yesterday's fast growers never crowd today's out: the fastest growers plus the
+        # strongest topic matches. The rest wait for a later run (not marked processed).
+        by_vel = sorted(raws, key=velocity_of, reverse=True)
+        by_topic = sorted(raws, key=topic_score, reverse=True)
+        pooled, seen = [], set()
+        for r in by_vel[:POOL_BY_VELOCITY] + by_topic[:POOL_BY_TOPIC]:
+            if r["full_name"] not in seen:
+                seen.add(r["full_name"])
+                pooled.append(r)
+        if len(pooled) < len(raws):
+            log.info("github: %d new rising repo(s) outside the rating pool wait for a later run",
+                     len(raws) - len(pooled))
+        names = {r["full_name"] for r in pooled}
+        rising = [i for i in rising if i.title in names]
+        raws = [r for r in raws if r["full_name"] in names]
         if cfg["readme_excerpt"] and os.environ.get(UrllibTransport.TOKEN_ENV, "").strip():
             for r in raws:
                 r["_readme_excerpt"] = self._readme_excerpt(ctx, r["full_name"])
@@ -351,6 +360,9 @@ class GitHubAdapter(SourceAdapter):
                            -topic_score(raw), -velocity_of(raw), item))
         scored.sort(key=lambda t: t[:4])  # rated first by relevance, then topic match, then velocity
         kept = [t[4] for t in scored[:cfg["rising_top"]]]
+        if len(scored) > len(kept):
+            log.info("github: %d rated rising repo(s) beyond rising_top=%d wait for a later run",
+                     len(scored) - len(kept), cfg["rising_top"])
         out = [i for i in items if not i.id.startswith("rising:")] + kept
         out.sort(key=lambda i: (self._kind_rank(i), -(i.metrics.get("relevance") or 0)))
         return out, weeded

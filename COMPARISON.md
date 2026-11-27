@@ -52,8 +52,9 @@ diamond rule. A one-line "velocity is a signal, never the score" is added to the
   script floors the age at 0.1 day), so the threshold is harder to reach for brand-new repos on purpose.
 - Prompt wording: say so when a video is too basic or unverified hype, never invent numbers or timestamps,
   say what would confirm a diamond, velocity is never the score.
-- Instagram: caption-first-line title, a clear error when the configured command is missing, a `limit`,
-  likes, comments and hashtags as metrics.
+- Instagram: caption-first-line title, a clear error when the configured command is missing, a `limit` that
+  applies to NEW reels (in `rank_new`, so reels already processed never use up the window), likes, comments and
+  hashtags as metrics.
 - X: opt-in adapter (`adapters/x.py`), off unless `paid_api_approved = true`, `usernames` is non-empty and the
   token variable is set, with the script's cost caps and username-to-id cache. Nothing in this branch has ever
   called the real X API: tests use recorded fixtures and fail on any `urlopen`. Not ported: its keyword

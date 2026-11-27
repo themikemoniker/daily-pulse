@@ -253,10 +253,44 @@ def test_likes_comments_and_hashtags_are_optional_metrics_and_bad_values_are_lef
     assert m["A2"] == {"source": "saved"} and m["A3"] == {"source": "saved"}
 
 
-def test_the_per_run_limit_keeps_saved_reels_first():
+def test_the_per_run_limit_applies_to_new_reels_saved_first_and_the_rest_wait():
+    from daily_pulse.adapters.base import AdapterContext
+    from daily_pulse.adapters.instagram import InstagramAdapter
+
     entries = [_entry(f"L{i}", kind="liked") for i in range(3)] + [_entry(f"S{i}") for i in range(3)]
-    assert [i.id for i in _ig(entries, limit=4)] == ["S0", "S1", "S2", "L0"]
-    assert len(_ig(entries)) == 6  # the default is generous
+    listed = _ig(entries, limit=4)
+    assert [i.id for i in listed] == ["S0", "S1", "S2", "L0", "L1", "L2"]  # listing does not cut
+    kept, weeded = InstagramAdapter().rank_new(listed, AdapterContext(config={"limit": 4}))
+    assert [i.id for i in kept] == ["S0", "S1", "S2", "L0"] and weeded == []
+    assert len(InstagramAdapter().rank_new(listed, AdapterContext(config={}))[0]) == 6  # default is generous
+
+
+def test_already_processed_reels_never_use_up_the_limit(make_env, fixtures_dir):
+    import json as _json
+
+    registry.register(InstagramAdapter())
+    cfg, data, out = make_env(sources=("instagram",), extra="")
+    cfg.write_text(cfg.read_text().replace("[sources.instagram]\nenabled = true", "[sources.instagram]\nenabled = true\nlimit = 2"))
+    items = [_entry(f"S{i}", f"reel {i}") for i in range(4)]
+    (fixtures_dir / "instagram").mkdir(exist_ok=True)
+    (fixtures_dir / "instagram" / "items.json").write_text(_json.dumps(items))
+    seen = []
+    for _ in range(3):
+        main(["run", "--config", str(cfg), "--fixtures", str(fixtures_dir), "--out", str(out), "--date", "2026-01-15"])
+        res = _json.loads((out / "run-2026-01-15.json").read_text())
+        seen += [i["id"] for i in res["sources"]["instagram"]["items"]]
+    assert sorted(seen) == ["S0", "S1", "S2", "S3"]  # two a run, none repeated, none lost
+
+
+def test_blank_hashtags_are_left_out_rather_than_passed_on_empty():
+    items = _ig([_entry("A1", "c", hashtags=["#", " ", ""]), _entry("A2", "c", hashtags=["#ok", "#"])])
+    m = {i.id: i.metrics for i in items}
+    assert "hashtags" not in m["A1"] and m["A2"]["hashtags"] == ["ok"]
+
+
+def test_a_bad_limit_is_rejected_even_when_the_listing_is_empty():
+    with pytest.raises(ValueError, match=r"sources\.instagram"):
+        _ig([], limit=0)
 
 
 @pytest.mark.parametrize("limit", [0, -1, "5", True, 2.5])
